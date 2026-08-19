@@ -271,8 +271,8 @@ class LocalDropRepositoryImpl(context: Context) : LocalDropRepository {
     private fun deviceType(): DeviceType = if (app.resources.configuration.smallestScreenWidthDp >= 600) DeviceType.TABLET else DeviceType.PHONE
     private fun LocalDevice.toEntity(paired: Boolean) = PairedDeviceEntity(id, name, host, port, System.currentTimeMillis(), paired, publicKey, fingerprint)
     private fun HistoryEntity.toDomain() = TransferHistory(id, fileName, size, timestamp, deviceName, TransferDirection.valueOf(direction), TransferState.valueOf(state), error, sha256)
-    private fun SettingsEntity.toDomain() = LocalSettings(deviceName, port, defaultFolder?.let(Uri::parse), autoDiscovery, confirmIncoming, verifyIntegrity)
-    private fun LocalSettings.toEntity() = SettingsEntity(1, deviceName, port, defaultFolder?.toString(), autoDiscovery, confirmIncoming, verifyIntegrity)
+    private fun SettingsEntity.toDomain() = LocalSettings(deviceName, port, defaultFolder?.let(Uri::parse), autoDiscovery, confirmIncoming, verifyIntegrity, runCatching { AppTheme.valueOf(theme) }.getOrDefault(AppTheme.SYSTEM))
+    private fun LocalSettings.toEntity() = SettingsEntity(1, deviceName, port, defaultFolder?.toString(), autoDiscovery, confirmIncoming, verifyIntegrity, theme.name)
     private data class IncomingDecision(val accepted: Boolean, val folder: Uri?)
     private data class ChunkResult(val index: Int, val nextOffset: Long, val completed: Boolean, val sha256: String?)
     private data class SaveResult(val files: List<SaveFile>)
