@@ -8,12 +8,15 @@
 - [x] Reinicio automático del stack local al cambiar la red.
 - [x] Validación de IP privada y parser QR versionado.
 
-## Fase 2 — pairing autenticado
+## Fase 2 — pairing autenticado (en progreso)
 
-- [ ] Identidad persistente por dispositivo usando Android Keystore.
-- [ ] Clave pública y fingerprint visible.
+- [x] Identidad persistente por dispositivo usando Android Keystore.
+- [x] Clave pública y fingerprint visible en el QR y en solicitudes.
+- [x] Sesiones de subida firmadas con `SHA256withECDSA`.
+- [x] Un dispositivo emparejado exige clave pública, fingerprint y firma válidos.
 - [ ] Confirmación explícita de pairing desde ambos dispositivos.
-- [ ] Nonce firmado para autenticar cada sesión.
+- [ ] Nonce de desafío firmado por sesión de recepción.
+- [ ] UI para revocar dispositivos emparejados.
 - [ ] No aceptar automáticamente dispositivos solo descubiertos.
 
 ## Fase 3 — transferencias resilientes
