@@ -29,6 +29,12 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
       - name: Build, test and lint
         run: gradle clean test assembleDebug lint --stacktrace
+      - name: Build Linux C++ client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ libcurl4-openssl-dev libssl-dev
+          cmake -S desktop-cpp -B desktop-cpp/build
+          cmake --build desktop-cpp/build --parallel
       - name: Prepare release files
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
