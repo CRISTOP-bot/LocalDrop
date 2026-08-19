@@ -38,7 +38,7 @@ class HttpTransferDataSource(private val resolver: ContentResolver) {
             var offset = 0L
             while (offset < part.size || (part.size == 0L && offset == 0L)) {
                 coroutineContext.ensureActive()
-                val chunkSize = if (part.size == 0L) 0 else minOf(CHUNK_SIZE, part.size - offset)
+                val chunkSize = if (part.size == 0L) 0L else minOf(CHUNK_SIZE.toLong(), part.size - offset)
                 val bytes = ByteArray(chunkSize.toInt())
                 resolver.openInputStream(part.uri)?.use { source ->
                     var skipped = 0L
