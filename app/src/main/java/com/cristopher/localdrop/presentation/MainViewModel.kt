@@ -27,6 +27,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val incoming = repository.incomingRequests.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val activeTransfer = repository.activeTransfer.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
     val settings = repository.settings.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), LocalSettings("Android", 0))
+    val localIdentity = repository.localIdentity.stateIn(viewModelScope, SharingStarted.Eagerly, LocalIdentity("localdrop-device", "", ""))
     private val _message = MutableSharedFlow<String>(extraBufferCapacity = 1)
     val message = _message.asSharedFlow()
     private val _sharedFiles = MutableStateFlow<List<TransferFile>>(emptyList())
