@@ -45,6 +45,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _sharedFiles.value = emptyList()
     }
     fun cancel() { repository.cancelTransfer() }
+    fun revokeDevice(deviceId: String) = viewModelScope.launch { repository.revokeDevice(deviceId); _message.emit("Dispositivo revocado") }
     fun acceptIncoming(sessionId: String, folder: Uri?) = viewModelScope.launch { answerIncoming(sessionId, true, folder) }
     fun rejectIncoming(sessionId: String) = viewModelScope.launch { answerIncoming(sessionId, false, null) }
     fun saveSettings(settings: LocalSettings) = viewModelScope.launch { repository.updateSettings(settings); _message.emit("Configuración guardada") }
@@ -52,7 +53,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun onQrScanned(raw: String) {
         runCatching {
             val qr = QrConnectionParser.parse(raw)
-            val device = LocalDevice(qr.deviceId, qr.name, qr.host, qr.port, DeviceType.UNKNOWN, DeviceStatus.CONNECTED, paired = true)
+            val device = LocalDevice(qr.deviceId, qr.name, qr.host, qr.port, DeviceType.UNKNOWN, DeviceStatus.CONNECTED, paired = true, publicKey = qr.publicKey, fingerprint = qr.fingerprint)
             scannedDevice.value = device
             viewModelScope.launch { repository.pairDevice(device); _message.emit("Dispositivo emparejado mediante QR") }
         }.onFailure { error -> viewModelScope.launch { _message.emit(error.message ?: "El QR no pertenece a LocalDrop") } }
