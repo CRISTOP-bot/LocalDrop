@@ -32,7 +32,7 @@ impl Identity {
         let fp = fingerprint(der.as_bytes());
         Ok(Self { signing, public_key, fingerprint: fp })
     }
-    pub fn sign(&self, message: &str) -> String { b64_encode(&self.signing.sign(message.as_bytes()).to_der()) }
+    pub fn sign(&self, message: &str) -> String { let signature: Signature = self.signing.sign(message.as_bytes()); b64_encode(&signature.to_der()) }
     pub fn verify(public_key: &str, message: &str, signature: &str) -> bool {
         let result = (|| -> Result<bool> {
             let der = b64_decode(public_key)?;
