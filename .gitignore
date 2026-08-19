@@ -1,0 +1,25 @@
+# Android / Gradle
+.gradle/
+**/build/
+*/build/
+local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+.idea/
+*.iml
+.DS_Store
+
+# Local and generated configuration
+.env
+.env.*
+*.jks
+*.keystore
+*.p12
+*.pem
+signing.properties
+keystore.properties
+
+# IDE / OS
+*.swp
+Thumbs.db
