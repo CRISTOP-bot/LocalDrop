@@ -16,7 +16,7 @@
 - [x] Un dispositivo emparejado exige clave pública, fingerprint y firma válidos.
 - [ ] Confirmación explícita de pairing desde ambos dispositivos.
 - [ ] Nonce de desafío firmado por sesión de recepción.
-- [ ] UI para revocar dispositivos emparejados.
+- [x] UI para revocar dispositivos emparejados.
 - [ ] No aceptar automáticamente dispositivos solo descubiertos.
 
 ## Fase 3 — transferencias resilientes (en progreso)
