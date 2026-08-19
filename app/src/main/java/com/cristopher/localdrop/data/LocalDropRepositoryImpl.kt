@@ -85,6 +85,7 @@ class LocalDropRepositoryImpl(context: Context) : LocalDropRepository {
         started = true
         startNetworkStack()
         registerNetworkCallback()
+        TransferService.start(app)
     }
 
     private suspend fun startNetworkStack() {
@@ -182,7 +183,6 @@ class LocalDropRepositoryImpl(context: Context) : LocalDropRepository {
         db.transferQueueDao().markRunning(item.id)
         val file = TransferFile(Uri.parse(item.uri), item.fileName, item.size, item.mimeType)
         val device = LocalDevice(item.deviceId, item.deviceName, item.host, item.port, paired = true)
-        TransferService.start(app)
         try {
             _active.value = TransferProgress(file.name, 0, file.size, state = TransferState.RUNNING)
             notifyProgress(_active.value)
@@ -212,7 +212,6 @@ class LocalDropRepositoryImpl(context: Context) : LocalDropRepository {
                 delay(300)
                 _active.value = null
                 clearNotification()
-                TransferService.stop(app)
             }
         }
     }
