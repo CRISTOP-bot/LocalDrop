@@ -38,15 +38,16 @@ class LocalHttpServer(private val scope: CoroutineScope, private val onRequest: 
             val requestLine = lines.firstOrNull().orEmpty()
             val sessionUpload = requestLine.startsWith("POST /upload-session")
             val singleUpload = requestLine.startsWith("POST /upload")
-            if (!sessionUpload && !singleUpload) { writeResponse(s, 404, "Not found"); return }
+            val chunkUpload = requestLine.startsWith("POST /upload-chunk")
+            if (!sessionUpload && !singleUpload && !chunkUpload) { writeResponse(s, 404, "Not found"); return }
             val headers = lines.drop(1).filter { it.contains(':') }.associate { it.substringBefore(':').trim().lowercase() to it.substringAfter(':').trim() }
             val session = headers["x-localdrop-session"]?.takeIf { it.length in 8..100 } ?: UUID.randomUUID().toString()
-            val manifest = runCatching { if (sessionUpload) decodeManifest(headers["x-localdrop-manifest"]) else singleManifest(headers) }.getOrElse { writeResponse(s, 400, "Invalid manifest"); return }
+            val manifest = runCatching { if (sessionUpload || chunkUpload) decodeManifest(headers["x-localdrop-manifest"]) else singleManifest(headers) }.getOrElse { writeResponse(s, 400, "Invalid manifest"); return }
             val files = runCatching { TransferManifest.decode(manifest) }.getOrElse { writeResponse(s, 400, "Invalid manifest"); return }
             if (!isValidManifest(files)) { writeResponse(s, 400, "Invalid manifest"); return }
             val declaredLength = headers["content-length"]?.toLongOrNull()
             val totalSize = files.sumOf { it.size }
-            if (declaredLength != null && declaredLength != totalSize) { writeResponse(s, 400, "Length mismatch"); return }
+            if (!chunkUpload && declaredLength != null && declaredLength != totalSize) { writeResponse(s, 400, "Length mismatch"); return }
             val request = IncomingRequest(
                 sessionId = session,
                 device = LocalDevice(
@@ -93,6 +94,6 @@ class LocalHttpServer(private val scope: CoroutineScope, private val onRequest: 
     companion object {
         private const val MAX_HEADER_BYTES = 32 * 1024
         private fun decodeName(value: String): String? = try { Base64.getUrlDecoder().decode(value).toString(Charsets.UTF_8) } catch (_: IllegalArgumentException) { null }
-        fun writeResponse(socket: Socket, code: Int, message: String) { try { socket.getOutputStream().bufferedWriter().use { it.write("HTTP/1.1 $code $message\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"); it.flush() } } catch (_: Exception) { } }
+        fun writeResponse(socket: Socket, code: Int, message: String, headers: Map<String, String> = emptyMap()) { try { socket.getOutputStream().bufferedWriter().use { writer -> writer.write("HTTP/1.1 $code $message\r\nContent-Length: 0\r\nConnection: close\r\n"); headers.forEach { (key, value) -> writer.write("$key: $value\r\n") }; writer.write("\r\n"); writer.flush() } } catch (_: Exception) { } }
     }
 }
