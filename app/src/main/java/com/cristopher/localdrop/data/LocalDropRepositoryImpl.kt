@@ -18,6 +18,7 @@ import com.cristopher.localdrop.data.network.LocalHttpServer
 import com.cristopher.localdrop.data.security.LocalIdentityStore
 import com.cristopher.localdrop.data.transfer.HttpTransferDataSource
 import com.cristopher.localdrop.data.transfer.TransferService
+import com.cristopher.localdrop.data.transfer.UploadPart
 import com.cristopher.localdrop.domain.model.*
 import com.cristopher.localdrop.domain.repository.LocalDropRepository
 import com.cristopher.localdrop.utils.uniqueFileName
@@ -73,21 +74,15 @@ class LocalDropRepositoryImpl(context: Context) : LocalDropRepository {
             while (isActive) {
                 val queued = db.transferQueueDao().nextPending()
                 if (queued == null) delay(250) else {
-                    currentTransferJob = launch { processQueueItem(queued) }
+                    val batch = if (queued.batchId.isBlank()) listOf(queued) else db.transferQueueDao().pendingBatch(queued.batchId)
+                    currentTransferJob = launch { processQueueBatch(batch) }
                     try { currentTransferJob?.join() } finally { currentTransferJob = null }
                 }
             }
         }
     }
 
-    override suspend fun start() {
-        if (started) return
-        started = true
-        startNetworkStack()
-        registerNetworkCallback()
-        TransferService.start(app)
-    }
-
+    override suspend fun start() { if (!started) { started = true; startNetworkStack(); registerNetworkCallback(); TransferService.start(app) } }
     private suspend fun startNetworkStack() {
         val configured = _settings.value
         runCatching { server.start(configured.port) }.getOrElse { server.start(0) }
@@ -97,264 +92,120 @@ class LocalDropRepositoryImpl(context: Context) : LocalDropRepository {
         nsd.register(effective.deviceName, server.port, deviceId, deviceType())
         if (effective.autoDiscovery) startDiscovery()
     }
-
     private fun registerNetworkCallback() {
         if (networkCallback != null || connectivity == null) return
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) = scheduleNetworkRestart()
             override fun onLinkPropertiesChanged(network: Network, properties: android.net.LinkProperties) = scheduleNetworkRestart()
-            override fun onLost(network: Network) {
-                _devices.value = _devices.value.map { it.copy(status = DeviceStatus.DISCONNECTED) }
-                scheduleNetworkRestart()
-            }
+            override fun onLost(network: Network) { _devices.value = _devices.value.map { it.copy(status = DeviceStatus.DISCONNECTED) }; scheduleNetworkRestart() }
         }
         networkCallback = callback
-        runCatching { connectivity.registerDefaultNetworkCallback(callback) }
-            .onFailure { networkCallback = null }
+        runCatching { connectivity.registerDefaultNetworkCallback(callback) }.onFailure { networkCallback = null }
     }
-
-    private fun scheduleNetworkRestart() {
-        if (!started) return
-        networkRestartJob?.cancel()
-        networkRestartJob = scope.launch {
-            delay(NETWORK_DEBOUNCE_MS)
-            restartNetworkStack()
-        }
-    }
-
-    private suspend fun restartNetworkStack() {
-        if (!started) return
-        discoveryJob?.cancelAndJoin()
-        discoveryJob = null
-        nsd.stopDiscovery()
-        server.close()
-        startNetworkStack()
-    }
-
+    private fun scheduleNetworkRestart() { if (started) { networkRestartJob?.cancel(); networkRestartJob = scope.launch { delay(NETWORK_DEBOUNCE_MS); restartNetworkStack() } } }
+    private suspend fun restartNetworkStack() { if (!started) return; discoveryJob?.cancelAndJoin(); discoveryJob = null; nsd.stopDiscovery(); server.close(); startNetworkStack() }
     private fun startDiscovery() {
         discoveryJob?.cancel()
-        discoveryJob = scope.launch {
-            nsd.discover(deviceId).collect { discovered ->
-                val merged = discovered.map { device ->
-                    val old = db.pairedDeviceDao().findById(device.id)
-                    device.copy(paired = old?.paired == true, publicKey = old?.publicKey, fingerprint = old?.fingerprint)
-                }
-                _devices.value = merged
-                merged.forEach { device -> db.pairedDeviceDao().upsert(device.toEntity(device.paired)) }
-            }
-        }
+        discoveryJob = scope.launch { nsd.discover(deviceId).collect { discovered ->
+            val merged = discovered.map { device -> val old = db.pairedDeviceDao().findById(device.id); device.copy(paired = old?.paired == true, publicKey = old?.publicKey, fingerprint = old?.fingerprint) }
+            _devices.value = merged
+            merged.forEach { device -> db.pairedDeviceDao().upsert(device.toEntity(device.paired)) }
+        } }
     }
-
-    override suspend fun stop() {
-        networkRestartJob?.cancelAndJoin()
-        networkRestartJob = null
-        unregisterNetworkCallback()
-        discoveryJob?.cancelAndJoin()
-        discoveryJob = null
-        nsd.stopDiscovery()
-        nsd.unregister()
-        server.close()
-        started = false
-    }
-
-    private fun unregisterNetworkCallback() {
-        val callback = networkCallback ?: return
-        runCatching { connectivity?.unregisterNetworkCallback(callback) }
-        networkCallback = null
-    }
-
-    override suspend fun refreshDevices() {
-        if (!started) start()
-        discoveryJob?.cancelAndJoin()
-        discoveryJob = null
-        nsd.stopDiscovery()
-        _devices.value = emptyList()
-        if (_settings.value.autoDiscovery) startDiscovery()
-    }
+    override suspend fun stop() { networkRestartJob?.cancelAndJoin(); networkRestartJob = null; unregisterNetworkCallback(); discoveryJob?.cancelAndJoin(); discoveryJob = null; nsd.stopDiscovery(); nsd.unregister(); server.close(); started = false }
+    private fun unregisterNetworkCallback() { networkCallback?.let { runCatching { connectivity?.unregisterNetworkCallback(it) } }; networkCallback = null }
+    override suspend fun refreshDevices() { if (!started) start(); discoveryJob?.cancelAndJoin(); discoveryJob = null; nsd.stopDiscovery(); _devices.value = emptyList(); if (_settings.value.autoDiscovery) startDiscovery() }
 
     override suspend fun send(files: List<TransferFile>, device: LocalDevice) {
         require(files.isNotEmpty()) { "No hay archivos para enviar" }
-        db.transferQueueDao().insertAll(files.map { file ->
-            QueuedTransferEntity(uri = file.uri.toString(), fileName = file.name, size = file.size, mimeType = file.mimeType, deviceId = device.id, deviceName = device.name, host = device.host, port = device.port, createdAt = System.currentTimeMillis())
-        })
+        val batchId = UUID.randomUUID().toString()
+        db.transferQueueDao().insertAll(files.map { file -> QueuedTransferEntity(batchId = batchId, uri = file.uri.toString(), fileName = file.name, size = file.size, mimeType = file.mimeType, deviceId = device.id, deviceName = device.name, host = device.host, port = device.port, createdAt = System.currentTimeMillis()) })
     }
 
-    private suspend fun processQueueItem(item: QueuedTransferEntity) {
-        db.transferQueueDao().markRunning(item.id)
-        val file = TransferFile(Uri.parse(item.uri), item.fileName, item.size, item.mimeType)
-        val device = LocalDevice(item.deviceId, item.deviceName, item.host, item.port, paired = true)
+    private suspend fun processQueueBatch(items: List<QueuedTransferEntity>) {
+        if (items.isEmpty()) return
+        val ids = items.map { it.id }; val first = items.first(); val device = LocalDevice(first.deviceId, first.deviceName, first.host, first.port, paired = true)
+        val files = items.map { TransferFile(Uri.parse(it.uri), it.fileName, it.size, it.mimeType) }
+        db.transferQueueDao().markRunning(ids)
         try {
-            _active.value = TransferProgress(file.name, 0, file.size, state = TransferState.RUNNING)
+            _active.value = TransferProgress("${files.first().name} (${files.size} archivos)", 0, files.sumOf { it.size }, state = TransferState.RUNNING)
             notifyProgress(_active.value)
-            val sessionId = UUID.randomUUID().toString()
-            val sha256 = uploader.upload(device.host, device.port, sessionId, deviceId, _settings.value.deviceName, _identity.value.publicKey, _identity.value.fingerprint, identityStore::sign, file.uri, file.name, file.mimeType, file.size, _settings.value.verifyIntegrity) { progress ->
-                _active.value = progress
-                notifyProgress(progress)
-            }
-            db.transferQueueDao().markFinished(item.id, TransferState.COMPLETED.name, null)
-            addHistory(file, device.name, TransferDirection.SENT, TransferState.COMPLETED, null, sha256)
+            val parts = files.map { UploadPart(it.uri, it.name, it.mimeType, it.size) }
+            val hashes = uploader.uploadSession(device.host, device.port, UUID.randomUUID().toString(), deviceId, _settings.value.deviceName, _identity.value.publicKey, _identity.value.fingerprint, identityStore::sign, parts, _settings.value.verifyIntegrity) { progress -> _active.value = progress; notifyProgress(progress) }
+            db.transferQueueDao().markFinished(ids, TransferState.COMPLETED.name, null)
+            files.forEachIndexed { index, file -> addHistory(file, device.name, TransferDirection.SENT, TransferState.COMPLETED, null, hashes[index]) }
         } catch (cancelled: CancellationException) {
-            db.transferQueueDao().markFinished(item.id, TransferState.CANCELLED.name, "Cancelada")
-            addHistory(file, device.name, TransferDirection.SENT, TransferState.CANCELLED, "Cancelada", null)
-            _active.value = _active.value?.copy(state = TransferState.CANCELLED, error = "Cancelada")
+            db.transferQueueDao().markFinished(ids, TransferState.CANCELLED.name, "Cancelada"); files.forEach { addHistory(it, device.name, TransferDirection.SENT, TransferState.CANCELLED, "Cancelada", null) }; _active.value = _active.value?.copy(state = TransferState.CANCELLED, error = "Cancelada")
         } catch (error: Exception) {
-            if (item.attempts < MAX_TRANSFER_ATTEMPTS) {
-                db.transferQueueDao().retry(item.id, error.message ?: "Error temporal")
-                delay(RETRY_DELAYS[item.attempts.coerceIn(0, RETRY_DELAYS.lastIndex)])
-            } else {
-                val state = if (error.message?.contains("SHA-256", true) == true) TransferState.CORRUPTED else TransferState.FAILED
-                db.transferQueueDao().markFinished(item.id, state.name, error.message)
-                addHistory(file, device.name, TransferDirection.SENT, state, error.message, null)
-                _active.value = _active.value?.copy(state = state, error = error.message)
-            }
-        } finally {
-            withContext(NonCancellable) {
-                delay(300)
-                _active.value = null
-                clearNotification()
-            }
-        }
+            if (first.attempts < MAX_TRANSFER_ATTEMPTS) { db.transferQueueDao().retry(ids, error.message ?: "Error temporal"); delay(RETRY_DELAYS[first.attempts.coerceIn(0, RETRY_DELAYS.lastIndex)]) }
+            else { val state = if (error.message?.contains("SHA-256", true) == true) TransferState.CORRUPTED else TransferState.FAILED; db.transferQueueDao().markFinished(ids, state.name, error.message); files.forEach { addHistory(it, device.name, TransferDirection.SENT, state, error.message, null) }; _active.value = _active.value?.copy(state = state, error = error.message) }
+        } finally { withContext(NonCancellable) { delay(300); _active.value = null; clearNotification() } }
     }
 
-    override suspend fun answerIncoming(sessionId: String, accepted: Boolean, folder: Uri?) {
-        pendingAnswers.remove(sessionId)?.complete(IncomingDecision(accepted, folder))
-        _incoming.update { it - sessionId }
-    }
-
-    override suspend fun pairDevice(device: LocalDevice) {
-        val paired = device.copy(paired = true)
-        _devices.update { list -> list.filterNot { it.id == paired.id } + paired }
-        db.pairedDeviceDao().upsert(paired.toEntity(true))
-    }
+    override suspend fun answerIncoming(sessionId: String, accepted: Boolean, folder: Uri?) { pendingAnswers.remove(sessionId)?.complete(IncomingDecision(accepted, folder)); _incoming.update { it - sessionId } }
+    override suspend fun pairDevice(device: LocalDevice) { val paired = device.copy(paired = true); _devices.update { list -> list.filterNot { it.id == paired.id } + paired }; db.pairedDeviceDao().upsert(paired.toEntity(true)) }
 
     private suspend fun handleIncoming(request: IncomingRequest, body: InputStream, socket: Socket, headers: Map<String, String>) {
-        val known = db.pairedDeviceDao().findById(request.device.id)
-        val authenticated = isAuthenticated(request, known)
-        if ((known?.paired == true && !authenticated) || (!_settings.value.confirmIncoming && !authenticated)) {
-            addIncomingHistory(request, TransferState.FAILED, "Autenticación de dispositivo inválida")
-            LocalHttpServer.writeResponse(socket, 401, "Authentication required")
-            return
-        }
-        val decision = CompletableDeferred<IncomingDecision>()
-        pendingAnswers[request.sessionId] = decision
-        _incoming.update { it + (request.sessionId to request) }
+        val known = db.pairedDeviceDao().findById(request.device.id); val authenticated = isAuthenticated(request, known)
+        if ((known?.paired == true && !authenticated) || (!_settings.value.confirmIncoming && !authenticated)) { request.files.forEach { addIncomingHistory(request, it, TransferState.FAILED, "Autenticación de dispositivo inválida") }; LocalHttpServer.writeResponse(socket, 401, "Authentication required"); return }
+        val decision = CompletableDeferred<IncomingDecision>(); pendingAnswers[request.sessionId] = decision; _incoming.update { it + (request.sessionId to request) }
         if (!_settings.value.confirmIncoming) decision.complete(IncomingDecision(true, _settings.value.defaultFolder))
         val answer = withTimeoutOrNull(INCOMING_TIMEOUT_MS) { decision.await() } ?: IncomingDecision(false, null)
-        pendingAnswers.remove(request.sessionId)
-        _incoming.update { it - request.sessionId }
-        if (!answer.accepted) { addIncomingHistory(request, TransferState.REJECTED, "Rechazada por el usuario"); LocalHttpServer.writeResponse(socket, 403, "Rejected"); return }
+        pendingAnswers.remove(request.sessionId); _incoming.update { it - request.sessionId }
+        if (!answer.accepted) { request.files.forEach { addIncomingHistory(request, it, TransferState.REJECTED, "Rechazada por el usuario") }; LocalHttpServer.writeResponse(socket, 403, "Rejected"); return }
         try {
-            val result = saveStream(request, body, answer.folder ?: _settings.value.defaultFolder, request.files.first().size)
-            addIncomingHistory(request, TransferState.COMPLETED, null, result.sha256)
+            val result = saveSession(request, body, answer.folder ?: _settings.value.defaultFolder)
+            result.files.forEachIndexed { index, saved -> addIncomingHistory(request, request.files[index], TransferState.COMPLETED, null, saved.sha256) }
             LocalHttpServer.writeResponse(socket, 200, "OK")
         } catch (error: Exception) {
             val state = if (error is IntegrityException) TransferState.CORRUPTED else TransferState.FAILED
-            addIncomingHistory(request, state, error.message, request.files.first().sha256)
-            LocalHttpServer.writeResponse(socket, 500, "Transfer failed")
+            request.files.forEach { addIncomingHistory(request, it, state, error.message, it.sha256) }; LocalHttpServer.writeResponse(socket, 500, "Transfer failed")
         }
     }
-
     private fun isAuthenticated(request: IncomingRequest, known: PairedDeviceEntity?): Boolean {
-        val publicKey = request.device.publicKey ?: return false
-        val fingerprint = request.device.fingerprint ?: return false
+        val publicKey = request.device.publicKey ?: return false; val fingerprint = request.device.fingerprint ?: return false
         if (known?.publicKey != null && known.publicKey != publicKey) return false
         if (known?.fingerprint != null && known.fingerprint != fingerprint) return false
-        val expected = request.files.first()
-        val message = "${request.sessionId}|${expected.name}|${expected.size}|${expected.sha256.orEmpty()}"
-        return request.signature?.let { LocalIdentityStore.verify(publicKey, message, it) } == true
+        val manifest = request.manifest ?: return false
+        return request.signature?.let { LocalIdentityStore.verify(publicKey, "${request.sessionId}|$manifest", it) } == true
     }
 
-    private suspend fun saveStream(request: IncomingRequest, body: InputStream, folder: Uri?, total: Long): SaveResult = withContext(Dispatchers.IO) {
-        require(total >= 0) { "Tamaño inválido" }
-        val destination = destinationMutex.withLock { createDestination(folder, request.files.first().name, request.files.first().mimeType) }
-        val output = openOutput(destination) ?: error("No se pudo crear el archivo")
-        val digest = MessageDigest.getInstance("SHA-256")
-        var copied = 0L
-        val startedAt = System.nanoTime()
-        val buffer = ByteArray(BUFFER_SIZE)
+    private suspend fun saveSession(request: IncomingRequest, body: InputStream, folder: Uri?): SaveResult = withContext(Dispatchers.IO) {
+        val destinations = mutableListOf<Uri>(); val saved = mutableListOf<SaveFile>()
+        val total = request.files.sumOf { it.size }; var overall = 0L
         try {
-            output.use { out ->
-                while (copied < total) {
-                    ensureActive()
-                    val read = body.read(buffer, 0, minOf(buffer.size.toLong(), total - copied).toInt())
-                    if (read < 0) break
-                    out.write(buffer, 0, read)
-                    digest.update(buffer, 0, read)
-                    copied += read
-                    val elapsed = (System.nanoTime() - startedAt).coerceAtLeast(1)
-                    val progress = TransferProgress(request.files.first().name, copied, total, copied * 1_000_000_000L / elapsed)
-                    _active.value = progress
-                    notifyProgress(progress)
+            request.files.forEach { file ->
+                val destination = destinationMutex.withLock { createDestination(folder, file.name, file.mimeType) }; destinations += destination
+                val digest = MessageDigest.getInstance("SHA-256"); var copied = 0L; val started = System.nanoTime(); val buffer = ByteArray(BUFFER_SIZE)
+                val output = openOutput(destination) ?: error("No se pudo crear ${file.name}")
+                output.use { out ->
+                    while (copied < file.size) {
+                        ensureActive(); val read = body.read(buffer, 0, minOf(buffer.size.toLong(), file.size - copied).toInt()); if (read < 0) break
+                        out.write(buffer, 0, read); digest.update(buffer, 0, read); copied += read; overall += read
+                        val elapsed = (System.nanoTime() - started).coerceAtLeast(1); _active.value = TransferProgress(file.name, copied, file.size, overall * 1_000_000_000L / elapsed); notifyProgress(_active.value)
+                    }
                 }
+                if (copied != file.size) throw IOException("Transferencia incompleta: ${file.name} $copied/${file.size} bytes")
+                val actual = digest.digest().joinToString("") { "%02x".format(it) }; if (file.sha256 != null && !file.sha256.equals(actual, true)) throw IntegrityException("SHA-256 no coincide: ${file.name}")
+                finalizeDestination(destination); saved += SaveFile(file.name, actual)
             }
-            if (copied != total) throw IOException("Transferencia incompleta: $copied/$total bytes")
-            val actual = digest.digest().joinToString("") { "%02x".format(it) }
-            val expected = request.files.first().sha256
-            if (expected != null && !expected.equals(actual, ignoreCase = true)) throw IntegrityException("SHA-256 no coincide")
-            finalizeDestination(destination)
-            _active.value = TransferProgress(request.files.first().name, copied, total, state = TransferState.COMPLETED)
-            notifyProgress(_active.value)
-            SaveResult(destination, actual)
-        } catch (error: Exception) {
-            deleteDestination(destination)
-            throw error
-        }
+            _active.value = TransferProgress("Sesión completa", total, total, state = TransferState.COMPLETED); notifyProgress(_active.value); SaveResult(saved)
+        } catch (error: Exception) { destinations.forEach(::deleteDestination); throw error }
     }
 
-    private fun createDestination(folder: Uri?, original: String, mime: String): Uri {
-        val name = uniqueFileName(original) { exists(folder, it) }
-        if (folder != null) {
-            val tree = DocumentFile.fromTreeUri(app, folder) ?: error("Carpeta no disponible")
-            return (tree.createFile(mime, name) ?: error("No se pudo crear el archivo")).uri
-        }
-        if (Build.VERSION.SDK_INT >= 29) {
-            val values = ContentValues().apply {
-                put(MediaStore.Downloads.DISPLAY_NAME, name)
-                put(MediaStore.Downloads.MIME_TYPE, mime)
-                put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/LocalDrop")
-                put(MediaStore.Downloads.IS_PENDING, 1)
-            }
-            return app.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: error("No se pudo guardar en Descargas")
-        }
-        val directory = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "LocalDrop").apply { mkdirs() }
-        return Uri.fromFile(File(directory, name))
-    }
-
-    private fun exists(folder: Uri?, name: String): Boolean {
-        if (folder != null) return DocumentFile.fromTreeUri(app, folder)?.findFile(name) != null
-        if (Build.VERSION.SDK_INT >= 29) {
-            val selection = "${MediaStore.Downloads.RELATIVE_PATH}=? AND ${MediaStore.Downloads.DISPLAY_NAME}=?"
-            app.contentResolver.query(MediaStore.Downloads.EXTERNAL_CONTENT_URI, arrayOf(MediaStore.Downloads._ID), selection, arrayOf(Environment.DIRECTORY_DOWNLOADS + "/LocalDrop/", name), null)?.use { return it.moveToFirst() }
-        }
-        return File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "LocalDrop/$name").exists()
-    }
-
+    private fun createDestination(folder: Uri?, original: String, mime: String): Uri { val name = uniqueFileName(original) { exists(folder, it) }; if (folder != null) { val tree = DocumentFile.fromTreeUri(app, folder) ?: error("Carpeta no disponible"); return (tree.createFile(mime, name) ?: error("No se pudo crear el archivo")).uri }; if (Build.VERSION.SDK_INT >= 29) { val values = ContentValues().apply { put(MediaStore.Downloads.DISPLAY_NAME, name); put(MediaStore.Downloads.MIME_TYPE, mime); put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/LocalDrop"); put(MediaStore.Downloads.IS_PENDING, 1) }; return app.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: error("No se pudo guardar en Descargas") }; val directory = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "LocalDrop").apply { mkdirs() }; return Uri.fromFile(File(directory, name)) }
+    private fun exists(folder: Uri?, name: String): Boolean { if (folder != null) return DocumentFile.fromTreeUri(app, folder)?.findFile(name) != null; if (Build.VERSION.SDK_INT >= 29) { val selection = "${MediaStore.Downloads.RELATIVE_PATH}=? AND ${MediaStore.Downloads.DISPLAY_NAME}=?"; app.contentResolver.query(MediaStore.Downloads.EXTERNAL_CONTENT_URI, arrayOf(MediaStore.Downloads._ID), selection, arrayOf(Environment.DIRECTORY_DOWNLOADS + "/LocalDrop/", name), null)?.use { return it.moveToFirst() } }; return File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "LocalDrop/$name").exists() }
     private fun openOutput(uri: Uri): OutputStream? = if (uri.scheme == "file") FileOutputStream(requireNotNull(uri.path)) else app.contentResolver.openOutputStream(uri, "w")
     private fun finalizeDestination(uri: Uri) { if (Build.VERSION.SDK_INT >= 29 && uri.authority == "media") app.contentResolver.update(uri, ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }, null, null) }
     private fun deleteDestination(uri: Uri) { if (uri.scheme == "file") File(uri.path.orEmpty()).delete() else app.contentResolver.delete(uri, null, null) }
 
     private suspend fun addHistory(file: TransferFile, deviceName: String, direction: TransferDirection, state: TransferState, error: String?, sha256: String?) = db.historyDao().insert(HistoryEntity(fileName = file.name, size = file.size, timestamp = System.currentTimeMillis(), deviceName = deviceName, direction = direction.name, state = state.name, error = error, sha256 = sha256))
-    private suspend fun addIncomingHistory(request: IncomingRequest, state: TransferState, error: String?, sha256: String? = null) = db.historyDao().insert(HistoryEntity(fileName = request.files.first().name, size = request.files.first().size, timestamp = System.currentTimeMillis(), deviceName = request.device.name, direction = TransferDirection.RECEIVED.name, state = state.name, error = error, sha256 = sha256))
-
-    override suspend fun updateSettings(settings: LocalSettings) {
-        _settings.value = settings
-        db.settingsDao().save(settings.toEntity())
-        if (started) { stop(); start() }
-    }
+    private suspend fun addIncomingHistory(request: IncomingRequest, file: IncomingFile, state: TransferState, error: String?, sha256: String? = null) = db.historyDao().insert(HistoryEntity(fileName = file.name, size = file.size, timestamp = System.currentTimeMillis(), deviceName = request.device.name, direction = TransferDirection.RECEIVED.name, state = state.name, error = error, sha256 = sha256))
+    override suspend fun updateSettings(settings: LocalSettings) { _settings.value = settings; db.settingsDao().save(settings.toEntity()); if (started) { stop(); start() } }
     override suspend fun deleteHistory(id: Long) = db.historyDao().delete(id)
     override fun cancelTransfer() { currentTransferJob?.cancel() }
-
-    override fun close() {
-        discoveryJob?.cancel(); networkRestartJob?.cancel(); currentTransferJob?.cancel(); queueJob?.cancel(); pendingAnswers.values.forEach { it.cancel() }; pendingAnswers.clear(); _incoming.value = emptyMap()
-        unregisterNetworkCallback(); nsd.unregister(); server.close(); scope.cancel(); db.close(); TransferService.stop(app); started = false
-    }
-
-    private fun notifyProgress(progress: TransferProgress?) {
-        val manager = app.getSystemService(NotificationManager::class.java)
-        if (Build.VERSION.SDK_INT >= 26) manager.createNotificationChannel(NotificationChannel(CHANNEL_ID, "Transferencias LocalDrop", NotificationManager.IMPORTANCE_LOW))
-        progress ?: return
-        manager.notify(NOTIFICATION_ID, NotificationCompat.Builder(app, CHANNEL_ID).setSmallIcon(android.R.drawable.stat_sys_upload).setContentTitle("LocalDrop: ${progress.fileName}").setContentText("${(progress.fraction * 100).toInt()}% • ${progress.bytesPerSecond} B/s").setProgress(100, (progress.fraction * 100).toInt(), false).setOngoing(progress.state == TransferState.RUNNING).build())
-    }
+    override fun close() { discoveryJob?.cancel(); networkRestartJob?.cancel(); currentTransferJob?.cancel(); queueJob?.cancel(); pendingAnswers.values.forEach { it.cancel() }; pendingAnswers.clear(); _incoming.value = emptyMap(); unregisterNetworkCallback(); nsd.unregister(); server.close(); scope.cancel(); db.close(); TransferService.stop(app); started = false }
+    private fun notifyProgress(progress: TransferProgress?) { val manager = app.getSystemService(NotificationManager::class.java); if (Build.VERSION.SDK_INT >= 26) manager.createNotificationChannel(NotificationChannel(CHANNEL_ID, "Transferencias LocalDrop", NotificationManager.IMPORTANCE_LOW)); progress ?: return; manager.notify(NOTIFICATION_ID, NotificationCompat.Builder(app, CHANNEL_ID).setSmallIcon(android.R.drawable.stat_sys_upload).setContentTitle("LocalDrop: ${progress.fileName}").setContentText("${(progress.fraction * 100).toInt()}% • ${progress.bytesPerSecond} B/s").setProgress(100, (progress.fraction * 100).toInt(), false).setOngoing(progress.state == TransferState.RUNNING).build()) }
     private fun clearNotification() { app.getSystemService(NotificationManager::class.java).cancel(NOTIFICATION_ID) }
     private fun deviceType(): DeviceType = if (app.resources.configuration.smallestScreenWidthDp >= 600) DeviceType.TABLET else DeviceType.PHONE
     private fun LocalDevice.toEntity(paired: Boolean) = PairedDeviceEntity(id, name, host, port, System.currentTimeMillis(), paired, publicKey, fingerprint)
@@ -362,7 +213,8 @@ class LocalDropRepositoryImpl(context: Context) : LocalDropRepository {
     private fun SettingsEntity.toDomain() = LocalSettings(deviceName, port, defaultFolder?.let(Uri::parse), autoDiscovery, confirmIncoming, verifyIntegrity)
     private fun LocalSettings.toEntity() = SettingsEntity(1, deviceName, port, defaultFolder?.toString(), autoDiscovery, confirmIncoming, verifyIntegrity)
     private data class IncomingDecision(val accepted: Boolean, val folder: Uri?)
-    private data class SaveResult(val uri: Uri, val sha256: String)
+    private data class SaveResult(val files: List<SaveFile>)
+    private data class SaveFile(val name: String, val sha256: String)
     private class IntegrityException(message: String) : IOException(message)
     companion object { private const val BUFFER_SIZE = 64 * 1024; private const val INCOMING_TIMEOUT_MS = 120_000L; private const val NETWORK_DEBOUNCE_MS = 600L; private const val MAX_TRANSFER_ATTEMPTS = 3; private val RETRY_DELAYS = longArrayOf(1_000L, 3_000L, 8_000L); private const val CHANNEL_ID = "localdrop_transfer"; private const val NOTIFICATION_ID = 42 }
 }
