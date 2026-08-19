@@ -17,22 +17,16 @@ import kotlin.coroutines.coroutineContext
 
 class HttpTransferDataSource(private val resolver: ContentResolver) {
     suspend fun upload(
-        host: String,
-        port: Int,
-        sessionId: String,
-        senderId: String,
-        senderName: String,
-        uri: Uri,
-        name: String,
-        mime: String,
-        size: Long,
-        verifyIntegrity: Boolean,
+        host: String, port: Int, sessionId: String, senderId: String, senderName: String,
+        publicKey: String, fingerprint: String, sign: (String) -> String,
+        uri: Uri, name: String, mime: String, size: Long, verifyIntegrity: Boolean,
         onProgress: (TransferProgress) -> Unit
     ): String? = withContext(Dispatchers.IO) {
         require(isPrivateIpv4(host)) { "Solo se permiten direcciones privadas de la red local" }
         require(port in 1..65535) { "Puerto local inválido" }
         require(size >= 0) { "Tamaño de archivo inválido" }
         val sha256 = if (verifyIntegrity) resolver.openInputStream(uri)?.use(::sha256Hex) ?: error("No se pudo leer $name") else null
+        val signature = sign("$sessionId|$name|$size|${sha256.orEmpty()}")
         val connection = (URL("http://$host:$port/upload").openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             doOutput = true
@@ -45,6 +39,9 @@ class HttpTransferDataSource(private val resolver: ContentResolver) {
             setRequestProperty("X-LocalDrop-Session", sessionId)
             setRequestProperty("X-LocalDrop-Device-Id", senderId)
             setRequestProperty("X-LocalDrop-Device-Name", senderName)
+            setRequestProperty("X-LocalDrop-Public-Key", publicKey)
+            setRequestProperty("X-LocalDrop-Fingerprint", fingerprint)
+            setRequestProperty("X-LocalDrop-Signature", signature)
             setRequestProperty("X-LocalDrop-File-Name", Base64.getUrlEncoder().withoutPadding().encodeToString(name.toByteArray(Charsets.UTF_8)))
             setRequestProperty("X-LocalDrop-File-Mime", mime)
             setRequestProperty("X-LocalDrop-File-Size", size.toString())
