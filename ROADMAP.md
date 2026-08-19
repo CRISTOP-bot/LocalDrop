@@ -25,7 +25,7 @@
 - [x] Cola persistente en Room; las tareas sobreviven al cierre del proceso.
 - [x] Recuperación de tareas que quedaron `RUNNING` al reiniciar.
 - [x] Reintentos controlados con backoff y máximo de tres intentos.
-- [ ] Reanudación por offsets.
+- [x] Reanudación por offsets en fragmentos de 1 MiB.
 - [x] Foreground Service mantiene activo el receptor HTTP/NSD mientras LocalDrop está en segundo plano.
 - [ ] Recuperación de una transferencia activa después de cambios de red.
 - [ ] Service worker dedicado para reanudar después de que Android mate el proceso.
