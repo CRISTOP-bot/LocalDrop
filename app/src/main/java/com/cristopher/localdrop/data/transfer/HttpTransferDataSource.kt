@@ -32,45 +32,37 @@ class HttpTransferDataSource(private val resolver: ContentResolver) {
         val manifest = TransferManifest.encode(parts.mapIndexed { index, part -> ManifestFile(part.name, part.size, part.mimeType, hashes[index]) })
         val signature = sign("$sessionId|$manifest")
         val totalSize = parts.sumOf { it.size }
-        val connection = (URL("http://$host:$port/upload-session").openConnection() as HttpURLConnection).apply {
-            requestMethod = "POST"
-            doOutput = true
-            doInput = true
-            connectTimeout = 8_000
-            readTimeout = 120_000
-            useCaches = false
-            setFixedLengthStreamingMode(totalSize)
-            setRequestProperty("Content-Type", "application/octet-stream")
-            setRequestProperty("X-LocalDrop-Session", sessionId)
-            setRequestProperty("X-LocalDrop-Device-Id", senderId)
-            setRequestProperty("X-LocalDrop-Device-Name", senderName)
-            setRequestProperty("X-LocalDrop-Public-Key", publicKey)
-            setRequestProperty("X-LocalDrop-Fingerprint", fingerprint)
-            setRequestProperty("X-LocalDrop-Signature", signature)
-            setRequestProperty("X-LocalDrop-Manifest", Base64.getUrlEncoder().withoutPadding().encodeToString(manifest.toByteArray(Charsets.UTF_8)))
-        }
-        try {
-            val started = System.nanoTime(); var sentTotal = 0L; val buffer = ByteArray(DEFAULT_BUFFER)
-            connection.outputStream.use { output ->
-                parts.forEach { part ->
-                    var sentFile = 0L
-                    val input = resolver.openInputStream(part.uri) ?: error("No se pudo abrir ${part.name}")
-                    input.use { source -> BufferedInputStream(source, DEFAULT_BUFFER).use { buffered ->
-                        while (true) {
-                            coroutineContext.ensureActive()
-                            val read = buffered.read(buffer); if (read < 0) break
-                            output.write(buffer, 0, read); sentFile += read; sentTotal += read
-                            val elapsed = (System.nanoTime() - started).coerceAtLeast(1)
-                            onProgress(TransferProgress(part.name, sentFile, part.size, sentTotal * 1_000_000_000L / elapsed))
-                        }
-                    } }
-                    if (sentFile != part.size) throw IOException("Transferencia incompleta: ${part.name} $sentFile/${part.size} bytes")
+        val encodedManifest = Base64.getUrlEncoder().withoutPadding().encodeToString(manifest.toByteArray(Charsets.UTF_8))
+        val started = System.nanoTime(); var sentTotal = 0L
+        parts.forEachIndexed { index, part ->
+            var offset = 0L
+            while (offset < part.size || (part.size == 0L && offset == 0L)) {
+                coroutineContext.ensureActive()
+                val chunkSize = if (part.size == 0L) 0 else minOf(CHUNK_SIZE, part.size - offset)
+                val bytes = ByteArray(chunkSize.toInt())
+                resolver.openInputStream(part.uri)?.use { source ->
+                    var skipped = 0L
+                    while (skipped < offset) { val n = source.skip(offset - skipped); if (n <= 0) { if (source.read() < 0) error("No se pudo reanudar ${part.name}"); skipped++ } else skipped += n }
+                    var read = 0
+                    while (read < bytes.size) { val n = source.read(bytes, read, bytes.size - read); if (n < 0) break; read += n }
+                    if (read != bytes.size) error("Archivo incompleto: ${part.name}")
+                } ?: error("No se pudo abrir ${part.name}")
+                val connection = (URL("http://$host:$port/upload-chunk").openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"; doOutput = true; doInput = true; connectTimeout = 8_000; readTimeout = 120_000; useCaches = false; setFixedLengthStreamingMode(bytes.size)
+                    setRequestProperty("Content-Type", "application/octet-stream"); setRequestProperty("X-LocalDrop-Session", sessionId); setRequestProperty("X-LocalDrop-Device-Id", senderId); setRequestProperty("X-LocalDrop-Device-Name", senderName); setRequestProperty("X-LocalDrop-Public-Key", publicKey); setRequestProperty("X-LocalDrop-Fingerprint", fingerprint); setRequestProperty("X-LocalDrop-Signature", signature); setRequestProperty("X-LocalDrop-Manifest", encodedManifest); setRequestProperty("X-LocalDrop-Chunk", "1"); setRequestProperty("X-LocalDrop-File-Index", index.toString()); setRequestProperty("X-LocalDrop-Offset", offset.toString()); setRequestProperty("X-LocalDrop-File-Size", part.size.toString())
                 }
+                try {
+                    connection.outputStream.use { it.write(bytes) }
+                    if (connection.responseCode !in 200..299) error("El dispositivo rechazó el fragmento (${connection.responseCode})")
+                    val next = connection.getHeaderField("X-LocalDrop-Next-Offset")?.toLongOrNull() ?: (offset + bytes.size)
+                    if (next <= offset || next > part.size || (part.size == 0L && next != 0L)) error("Offset de reanudación inválido")
+                    offset = next; sentTotal = parts.take(index).sumOf { it.size } + offset
+                    val elapsed = (System.nanoTime() - started).coerceAtLeast(1); onProgress(TransferProgress(part.name, offset, part.size, sentTotal * 1_000_000_000L / elapsed))
+                } finally { connection.disconnect() }
+                if (part.size == 0L) break
             }
-            if (sentTotal != totalSize) throw IOException("Sesión incompleta: $sentTotal/$totalSize bytes")
-            if (connection.responseCode !in 200..299) error("El dispositivo rechazó la sesión (${connection.responseCode})")
-            hashes
-        } finally { connection.disconnect() }
+        }
+        hashes
     }
-    companion object { private const val DEFAULT_BUFFER = 64 * 1024 }
+    companion object { private const val DEFAULT_BUFFER = 64 * 1024; private const val CHUNK_SIZE = 1024 * 1024 }
 }
