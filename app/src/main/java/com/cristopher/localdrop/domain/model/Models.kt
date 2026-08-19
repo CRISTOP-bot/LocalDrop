@@ -7,6 +7,7 @@ enum class DeviceStatus { AVAILABLE, CONNECTED, DISCONNECTED }
 enum class TransferDirection { SENT, RECEIVED }
 
 enum class TransferState { PENDING, RUNNING, COMPLETED, FAILED, CANCELLED, REJECTED, CORRUPTED }
+enum class AppTheme { SYSTEM, LIGHT, DARK }
 
 data class LocalIdentity(val deviceId: String, val publicKey: String, val fingerprint: String)
 
@@ -63,5 +64,6 @@ data class LocalSettings(
     val defaultFolder: Uri? = null,
     val autoDiscovery: Boolean = true,
     val confirmIncoming: Boolean = true,
-    val verifyIntegrity: Boolean = true
+    val verifyIntegrity: Boolean = true,
+    val theme: AppTheme = AppTheme.SYSTEM
 )
