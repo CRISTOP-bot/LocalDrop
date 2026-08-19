@@ -50,6 +50,9 @@ jobs:
           cp localdrop-linux-rust/target/release/localdrop-linux-rust localdrop-linux-rust-x86_64
           chmod +x localdrop-linux-rust-x86_64
           sha256sum localdrop-linux-rust-x86_64 > localdrop-linux-rust-x86_64.sha256
+          cp localdrop-linux-rust/target/release/localdrop-linux-rust-gui localdrop-linux-rust-gui-x86_64
+          chmod +x localdrop-linux-rust-gui-x86_64
+          sha256sum localdrop-linux-rust-gui-x86_64 > localdrop-linux-rust-gui-x86_64.sha256
       - name: Publish APK release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
@@ -63,3 +66,5 @@ jobs:
             LocalDrop-debug.apk.sha256
             localdrop-linux-rust-x86_64
             localdrop-linux-rust-x86_64.sha256
+            localdrop-linux-rust-gui-x86_64
+            localdrop-linux-rust-gui-x86_64.sha256
