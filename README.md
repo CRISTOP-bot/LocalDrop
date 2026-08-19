@@ -4,7 +4,7 @@
 
 LocalDrop transfers files directly between devices connected to the same local network. It does not require accounts, cloud storage, a relay server or an external backend.
 
-> Current status: Android client plus an experimental Linux desktop sender under `desktop/`. Both use the local IPv4 network and the authenticated resumable protocol.
+> Current status: Android client plus native Linux senders in C++ and Rust. All clients use the same local IPv4 protocol with pairing, signatures, SHA-256 and resumable chunks.
 
 ## Features
 
@@ -24,6 +24,7 @@ LocalDrop transfers files directly between devices connected to the same local n
 - Transfer notification showing local availability and active progress.
 - Settings for device name, port, default folder, automatic discovery, incoming confirmation and integrity checks.
 - Material 3 UI with empty, progress, error, history and incoming-request states.
+- Native Linux clients in C++17 (`desktop-cpp/`) and Rust (`localdrop-linux-rust/`) interoperable with Android.
 
 ## Architecture
 
@@ -60,12 +61,29 @@ Open `LocalDrop/` in Android Studio or run:
 
 The debug APK is generated at `app/build/outputs/apk/debug/app-debug.apk`.
 
+### Linux Rust client
+
+The native Rust sender requires Rust/Cargo only; its HTTP stack uses Rustls and does not require OpenSSL system libraries:
+
+```bash
+cd localdrop-linux-rust
+cargo test
+cargo build --release
+./target/release/localdrop-linux-rust 'localdrop://connect?...' file1 file2
+```
+
+The C++ client is available under `desktop-cpp/` and requires CMake, a C++17 compiler, `libcurl` and OpenSSL. The older Python prototype remains under `desktop/` for reference.
+
 ### GitHub Releases
 
-Every push to `main` runs the complete build, tests and lint. If everything passes, GitHub Actions creates a prerelease automatically with a tag such as `v0.1.12` and attaches:
+Every push to `main` runs the Android, C++, and Rust builds plus tests and lint. If everything passes, GitHub Actions creates a prerelease automatically and attaches:
 
 - `LocalDrop-debug.apk`
 - `LocalDrop-debug.apk.sha256`
+- `localdrop-linux-rust-x86_64`
+- `localdrop-linux-rust-x86_64.sha256`
+
+The Rust asset is an x86_64 Linux executable. Make it executable after downloading with `chmod +x localdrop-linux-rust-x86_64`. Pull requests only run verification and do not publish releases.
 
 Pull requests only run verification and do not publish releases. You can also start the workflow manually from the **Actions** tab.
 
@@ -80,17 +98,22 @@ Pull requests only run verification and do not publish releases. You can also st
 
 For Android Share Sheet, choose **Compartir → LocalDrop**. The app reads the supplied `content://` URI through `ContentResolver`; it does not assume a filesystem path.
 
+To send from Linux, download `localdrop-linux-rust-x86_64` from Releases, copy the QR URL from Android and run the command shown above. The Linux client performs the same mutual nonce pairing before sending files.
+
 ## Security and network boundaries
 
 The app binds a local `ServerSocket`, advertises it through NSD and connects only to private IPv4 addresses. Public Internet addresses, malformed QR data and unvalidated ports are rejected. Incoming transfers require visible user consent by default and show the origin device and file list before writing anything.
 
 Every transfer gets a temporary UUID session. The code keeps discovered and paired devices distinct: NSD discovery alone does not mark a device as paired; QR pairing stores the explicit pairing state in Room. Each device also creates a persistent P-256 identity in Android Keystore. Uploads include the public key, fingerprint and an `SHA256withECDSA` signature over the session metadata. Known paired devices are rejected if the key, fingerprint or signature is invalid.
 
-The MVP uses cleartext HTTP because traffic is local and the protocol is implemented over a private LAN. This is not a substitute for authenticated encryption on hostile networks. Public-key authentication is now applied to paired uploads; mutual challenge-response, pairing revocation and encrypted transport remain on the roadmap. No homemade cryptography is used.
+The app uses cleartext HTTP because traffic is local and the protocol is implemented over a private LAN. This is not a substitute for authenticated encryption on hostile networks. Pairing uses mutual nonce challenge-response, paired uploads are signed with P-256 ECDSA/SHA-256, and trusted devices can be revoked. No homemade cryptography is used.
 
 ## Project structure
 
 ```text
+desktop/                 Python prototype client
+desktop-cpp/             C++17 Linux client
+localdrop-linux-rust/    Native Rust Linux client
 app/src/main/java/com/cristopher/localdrop/
 ├── data/
 │   ├── discovery/       NSD/mDNS discovery
