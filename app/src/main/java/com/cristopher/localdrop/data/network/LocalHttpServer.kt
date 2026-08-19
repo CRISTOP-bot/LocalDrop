@@ -61,7 +61,10 @@ class LocalHttpServer(private val scope: CoroutineScope, private val onRequest: 
             val current = input.read()
             if (current < 0) return null
             output.write(current)
-            if (previous == '\r'.code && current == '\n'.code && output.toString(Charsets.UTF_8).endsWith("\r\n\r\n")) return output.toString(Charsets.UTF_8)
+            if (previous == '\r'.code && current == '\n'.code) {
+                val headerText = output.toString(Charsets.UTF_8.name())
+                if (headerText.endsWith("\r\n\r\n")) return headerText
+            }
             previous = current
         }
         return null
