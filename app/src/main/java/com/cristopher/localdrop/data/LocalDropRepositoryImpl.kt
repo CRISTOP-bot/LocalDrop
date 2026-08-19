@@ -22,7 +22,6 @@ import com.cristopher.localdrop.domain.model.*
 import com.cristopher.localdrop.domain.repository.LocalDropRepository
 import com.cristopher.localdrop.utils.uniqueFileName
 import kotlinx.coroutines.*
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -53,7 +52,6 @@ class LocalDropRepositoryImpl(context: Context) : LocalDropRepository {
     private val _settings = MutableStateFlow(LocalSettings(Build.MODEL.ifBlank { "Android" }, 0))
     private val pendingAnswers = ConcurrentHashMap<String, CompletableDeferred<IncomingDecision>>()
     private val destinationMutex = Mutex()
-    private val transferQueue = Channel<QueuedTransfer>(Channel.UNLIMITED)
     private var discoveryJob: Job? = null
     private var queueJob: Job? = null
     private var currentTransferJob: Job? = null
@@ -71,9 +69,13 @@ class LocalDropRepositoryImpl(context: Context) : LocalDropRepository {
     init {
         scope.launch { db.settingsDao().observe().collect { value -> value?.let { _settings.value = it.toDomain() } } }
         queueJob = scope.launch {
-            for (queued in transferQueue) {
-                currentTransferJob = launch { processSend(queued.files, queued.device) }
-                try { currentTransferJob?.join() } finally { currentTransferJob = null }
+            db.transferQueueDao().resetRunning()
+            while (isActive) {
+                val queued = db.transferQueueDao().nextPending()
+                if (queued == null) delay(250) else {
+                    currentTransferJob = launch { processQueueItem(queued) }
+                    try { currentTransferJob?.join() } finally { currentTransferJob = null }
+                }
             }
         }
     }
@@ -171,33 +173,39 @@ class LocalDropRepositoryImpl(context: Context) : LocalDropRepository {
 
     override suspend fun send(files: List<TransferFile>, device: LocalDevice) {
         require(files.isNotEmpty()) { "No hay archivos para enviar" }
-        transferQueue.send(QueuedTransfer(files, device))
+        db.transferQueueDao().insertAll(files.map { file ->
+            QueuedTransferEntity(uri = file.uri.toString(), fileName = file.name, size = file.size, mimeType = file.mimeType, deviceId = device.id, deviceName = device.name, host = device.host, port = device.port, createdAt = System.currentTimeMillis())
+        })
     }
 
-    private suspend fun processSend(files: List<TransferFile>, device: LocalDevice) {
+    private suspend fun processQueueItem(item: QueuedTransferEntity) {
+        db.transferQueueDao().markRunning(item.id)
+        val file = TransferFile(Uri.parse(item.uri), item.fileName, item.size, item.mimeType)
+        val device = LocalDevice(item.deviceId, item.deviceName, item.host, item.port, paired = true)
         TransferService.start(app)
         try {
-            for (file in files) {
-                currentCoroutineContext().ensureActive()
-                var sha256: String? = null
-                try {
-                    _active.value = TransferProgress(file.name, 0, file.size, state = TransferState.RUNNING)
-                    notifyProgress(_active.value)
-                    val sessionId = UUID.randomUUID().toString()
-                    sha256 = uploader.upload(device.host, device.port, sessionId, deviceId, _settings.value.deviceName, _identity.value.publicKey, _identity.value.fingerprint, identityStore::sign, file.uri, file.name, file.mimeType, file.size, _settings.value.verifyIntegrity) { progress ->
-                        _active.value = progress
-                        notifyProgress(progress)
-                    }
-                    addHistory(file, device.name, TransferDirection.SENT, TransferState.COMPLETED, null, sha256)
-                } catch (cancelled: CancellationException) {
-                    addHistory(file, device.name, TransferDirection.SENT, TransferState.CANCELLED, cancelled.message, sha256)
-                    _active.value = _active.value?.copy(state = TransferState.CANCELLED, error = "Cancelada")
-                    throw cancelled
-                } catch (error: Exception) {
-                    val state = if (error.message?.contains("SHA-256", true) == true) TransferState.CORRUPTED else TransferState.FAILED
-                    addHistory(file, device.name, TransferDirection.SENT, state, error.message, sha256)
-                    _active.value = _active.value?.copy(state = state, error = error.message)
-                }
+            _active.value = TransferProgress(file.name, 0, file.size, state = TransferState.RUNNING)
+            notifyProgress(_active.value)
+            val sessionId = UUID.randomUUID().toString()
+            val sha256 = uploader.upload(device.host, device.port, sessionId, deviceId, _settings.value.deviceName, _identity.value.publicKey, _identity.value.fingerprint, identityStore::sign, file.uri, file.name, file.mimeType, file.size, _settings.value.verifyIntegrity) { progress ->
+                _active.value = progress
+                notifyProgress(progress)
+            }
+            db.transferQueueDao().markFinished(item.id, TransferState.COMPLETED.name, null)
+            addHistory(file, device.name, TransferDirection.SENT, TransferState.COMPLETED, null, sha256)
+        } catch (cancelled: CancellationException) {
+            db.transferQueueDao().markFinished(item.id, TransferState.CANCELLED.name, "Cancelada")
+            addHistory(file, device.name, TransferDirection.SENT, TransferState.CANCELLED, "Cancelada", null)
+            _active.value = _active.value?.copy(state = TransferState.CANCELLED, error = "Cancelada")
+        } catch (error: Exception) {
+            if (item.attempts < MAX_TRANSFER_ATTEMPTS) {
+                db.transferQueueDao().retry(item.id, error.message ?: "Error temporal")
+                delay(RETRY_DELAYS[item.attempts.coerceIn(0, RETRY_DELAYS.lastIndex)])
+            } else {
+                val state = if (error.message?.contains("SHA-256", true) == true) TransferState.CORRUPTED else TransferState.FAILED
+                db.transferQueueDao().markFinished(item.id, state.name, error.message)
+                addHistory(file, device.name, TransferDirection.SENT, state, error.message, null)
+                _active.value = _active.value?.copy(state = state, error = error.message)
             }
         } finally {
             withContext(NonCancellable) {
@@ -338,7 +346,7 @@ class LocalDropRepositoryImpl(context: Context) : LocalDropRepository {
     override fun cancelTransfer() { currentTransferJob?.cancel() }
 
     override fun close() {
-        discoveryJob?.cancel(); networkRestartJob?.cancel(); currentTransferJob?.cancel(); queueJob?.cancel(); transferQueue.close(); pendingAnswers.values.forEach { it.cancel() }; pendingAnswers.clear(); _incoming.value = emptyMap()
+        discoveryJob?.cancel(); networkRestartJob?.cancel(); currentTransferJob?.cancel(); queueJob?.cancel(); pendingAnswers.values.forEach { it.cancel() }; pendingAnswers.clear(); _incoming.value = emptyMap()
         unregisterNetworkCallback(); nsd.unregister(); server.close(); scope.cancel(); db.close(); TransferService.stop(app); started = false
     }
 
@@ -354,9 +362,8 @@ class LocalDropRepositoryImpl(context: Context) : LocalDropRepository {
     private fun HistoryEntity.toDomain() = TransferHistory(id, fileName, size, timestamp, deviceName, TransferDirection.valueOf(direction), TransferState.valueOf(state), error, sha256)
     private fun SettingsEntity.toDomain() = LocalSettings(deviceName, port, defaultFolder?.let(Uri::parse), autoDiscovery, confirmIncoming, verifyIntegrity)
     private fun LocalSettings.toEntity() = SettingsEntity(1, deviceName, port, defaultFolder?.toString(), autoDiscovery, confirmIncoming, verifyIntegrity)
-    private data class QueuedTransfer(val files: List<TransferFile>, val device: LocalDevice)
     private data class IncomingDecision(val accepted: Boolean, val folder: Uri?)
     private data class SaveResult(val uri: Uri, val sha256: String)
     private class IntegrityException(message: String) : IOException(message)
-    companion object { private const val BUFFER_SIZE = 64 * 1024; private const val INCOMING_TIMEOUT_MS = 120_000L; private const val NETWORK_DEBOUNCE_MS = 600L; private const val CHANNEL_ID = "localdrop_transfer"; private const val NOTIFICATION_ID = 42 }
+    companion object { private const val BUFFER_SIZE = 64 * 1024; private const val INCOMING_TIMEOUT_MS = 120_000L; private const val NETWORK_DEBOUNCE_MS = 600L; private const val MAX_TRANSFER_ATTEMPTS = 3; private val RETRY_DELAYS = longArrayOf(1_000L, 3_000L, 8_000L); private const val CHANNEL_ID = "localdrop_transfer"; private const val NOTIFICATION_ID = 42 }
 }
