@@ -21,6 +21,7 @@ data class HistoryEntity(
 @Entity(tableName = "queued_transfers")
 data class QueuedTransferEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val batchId: String = "",
     val uri: String,
     val fileName: String,
     val size: Long,
@@ -68,11 +69,12 @@ interface HistoryDao {
 @Dao
 interface TransferQueueDao {
     @Query("SELECT * FROM queued_transfers WHERE state = 'PENDING' ORDER BY createdAt ASC LIMIT 1") suspend fun nextPending(): QueuedTransferEntity?
+    @Query("SELECT * FROM queued_transfers WHERE batchId = :batchId AND state = 'PENDING' ORDER BY createdAt ASC") suspend fun pendingBatch(batchId: String): List<QueuedTransferEntity>
     @Insert suspend fun insertAll(items: List<QueuedTransferEntity>)
     @Query("UPDATE queued_transfers SET state = 'PENDING', lastError = NULL WHERE state = 'RUNNING'") suspend fun resetRunning()
-    @Query("UPDATE queued_transfers SET state = 'RUNNING', attempts = attempts + 1 WHERE id = :id") suspend fun markRunning(id: Long)
-    @Query("UPDATE queued_transfers SET state = :state, lastError = :error WHERE id = :id") suspend fun markFinished(id: Long, state: String, error: String?)
-    @Query("UPDATE queued_transfers SET state = 'PENDING', lastError = :error WHERE id = :id") suspend fun retry(id: Long, error: String)
+    @Query("UPDATE queued_transfers SET state = 'RUNNING', attempts = attempts + 1 WHERE id IN (:ids)") suspend fun markRunning(ids: List<Long>)
+    @Query("UPDATE queued_transfers SET state = :state, lastError = :error WHERE id IN (:ids)") suspend fun markFinished(ids: List<Long>, state: String, error: String?)
+    @Query("UPDATE queued_transfers SET state = 'PENDING', lastError = :error WHERE id IN (:ids)") suspend fun retry(ids: List<Long>, error: String)
     @Query("DELETE FROM queued_transfers WHERE id = :id") suspend fun delete(id: Long)
 }
 
@@ -90,7 +92,7 @@ interface PairedDeviceDao {
     @Query("UPDATE paired_devices SET paired = 1, publicKey = :publicKey, fingerprint = :fingerprint WHERE id = :id") suspend fun markPaired(id: String, publicKey: String, fingerprint: String)
 }
 
-@Database(entities = [HistoryEntity::class, QueuedTransferEntity::class, PairedDeviceEntity::class, SettingsEntity::class], version = 4, exportSchema = false)
+@Database(entities = [HistoryEntity::class, QueuedTransferEntity::class, PairedDeviceEntity::class, SettingsEntity::class], version = 5, exportSchema = false)
 abstract class LocalDropDatabase : RoomDatabase() {
     abstract fun historyDao(): HistoryDao
     abstract fun transferQueueDao(): TransferQueueDao
@@ -116,7 +118,10 @@ abstract class LocalDropDatabase : RoomDatabase() {
                 database.execSQL("CREATE TABLE IF NOT EXISTS queued_transfers (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, uri TEXT NOT NULL, fileName TEXT NOT NULL, size INTEGER NOT NULL, mimeType TEXT NOT NULL, deviceId TEXT NOT NULL, deviceName TEXT NOT NULL, host TEXT NOT NULL, port INTEGER NOT NULL, createdAt INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'PENDING', attempts INTEGER NOT NULL DEFAULT 0, lastError TEXT)")
             }
         }
+        private val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(database: SupportSQLiteDatabase) { database.execSQL("ALTER TABLE queued_transfers ADD COLUMN batchId TEXT NOT NULL DEFAULT ''") }
+        }
         fun create(context: android.content.Context): LocalDropDatabase = Room.databaseBuilder(context, LocalDropDatabase::class.java, "localdrop.db")
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).fallbackToDestructiveMigration().build()
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5).fallbackToDestructiveMigration().build()
     }
 }
