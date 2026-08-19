@@ -146,6 +146,7 @@ class LocalDropRepositoryImpl(context: Context) : LocalDropRepository {
 
     override suspend fun answerIncoming(sessionId: String, accepted: Boolean, folder: Uri?) { pendingAnswers.remove(sessionId)?.complete(IncomingDecision(accepted, folder)); _incoming.update { it - sessionId } }
     override suspend fun pairDevice(device: LocalDevice) { val paired = device.copy(paired = true); _devices.update { list -> list.filterNot { it.id == paired.id } + paired }; db.pairedDeviceDao().upsert(paired.toEntity(true)) }
+    override suspend fun revokeDevice(deviceId: String) { db.pairedDeviceDao().revoke(deviceId); _devices.update { list -> list.map { if (it.id == deviceId) it.copy(paired = false, publicKey = null, fingerprint = null) else it } } }
 
     private suspend fun handleIncoming(request: IncomingRequest, body: InputStream, socket: Socket, headers: Map<String, String>) {
         val known = db.pairedDeviceDao().findById(request.device.id); val authenticated = isAuthenticated(request, known)
