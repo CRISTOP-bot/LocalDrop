@@ -9,7 +9,7 @@ use url::Url;
 pub fn parse_qr(raw: &str) -> Result<Remote> {
     let url = Url::parse(raw.trim()).map_err(|e| LocalDropError::Qr(e.to_string()))?;
     if url.scheme() != "localdrop" || url.host_str() != Some("connect") { return Err(LocalDropError::Qr("se esperaba localdrop://connect".into())); }
-    let mut host=None; let mut port=None; let mut name=None; let mut pk=None; let mut fp=None;
+    let mut host: Option<String>=None; let mut port: Option<u16>=None; let mut name: Option<String>=None; let mut pk: Option<String>=None; let mut fp: Option<String>=None;
     for (k,v) in url.query_pairs() { match k.as_ref() { "host"=>host=Some(v.into_owned()), "port"=>port=v.parse().ok(), "name"=>name=Some(v.into_owned()), "pk"=>pk=Some(v.into_owned()), "fp"=>fp=Some(v.into_owned()), _=>{} } }
     let host=host.filter(|x| !x.is_empty()).ok_or_else(|| LocalDropError::Qr("falta host".into()))?;
     let port=port.filter(|x: &u16| *x>0).ok_or_else(|| LocalDropError::Qr("puerto inválido".into()))?;
