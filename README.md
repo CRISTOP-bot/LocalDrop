@@ -4,7 +4,7 @@
 
 LocalDrop transfers files directly between devices connected to the same local network. It does not require accounts, cloud storage, a relay server or an external backend.
 
-> Current status: MVP hardened for local Android use. The project is intentionally limited to Android and IPv4 private networks.
+> Current status: Android client plus an experimental Linux desktop sender under `desktop/`. Both use the local IPv4 network and the authenticated resumable protocol.
 
 ## Features
 
