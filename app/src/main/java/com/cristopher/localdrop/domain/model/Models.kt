@@ -8,6 +8,8 @@ enum class TransferDirection { SENT, RECEIVED }
 
 enum class TransferState { PENDING, RUNNING, COMPLETED, FAILED, CANCELLED, REJECTED, CORRUPTED }
 
+data class LocalIdentity(val deviceId: String, val publicKey: String, val fingerprint: String)
+
 data class LocalDevice(
     val id: String,
     val name: String,
@@ -15,15 +17,12 @@ data class LocalDevice(
     val port: Int,
     val type: DeviceType = DeviceType.UNKNOWN,
     val status: DeviceStatus = DeviceStatus.AVAILABLE,
-    val paired: Boolean = false
+    val paired: Boolean = false,
+    val publicKey: String? = null,
+    val fingerprint: String? = null
 )
 
-data class TransferFile(
-    val uri: Uri,
-    val name: String,
-    val size: Long,
-    val mimeType: String
-)
+data class TransferFile(val uri: Uri, val name: String, val size: Long, val mimeType: String)
 
 data class TransferProgress(
     val fileName: String,
@@ -51,7 +50,8 @@ data class TransferHistory(
 data class IncomingRequest(
     val sessionId: String,
     val device: LocalDevice,
-    val files: List<IncomingFile>
+    val files: List<IncomingFile>,
+    val signature: String? = null
 )
 
 data class IncomingFile(val name: String, val size: Long, val mimeType: String, val sha256: String? = null)
