@@ -46,9 +46,12 @@ class LocalHttpServer(private val scope: CoroutineScope, private val onRequest: 
                     id = headers["x-localdrop-device-id"] ?: "unknown",
                     name = headers["x-localdrop-device-name"]?.take(64) ?: "Dispositivo local",
                     host = s.inetAddress.hostAddress ?: "?",
-                    port = 0
+                    port = 0,
+                    publicKey = headers["x-localdrop-public-key"],
+                    fingerprint = headers["x-localdrop-fingerprint"]
                 ),
-                files = listOf(IncomingFile(fileName, fileSize, headers["x-localdrop-file-mime"] ?: "application/octet-stream", headers["x-localdrop-sha256"]))
+                files = listOf(IncomingFile(fileName, fileSize, headers["x-localdrop-file-mime"] ?: "application/octet-stream", headers["x-localdrop-sha256"])),
+                signature = headers["x-localdrop-signature"]
             )
             onRequest(request, input, s, headers)
         }
