@@ -19,6 +19,7 @@ LocalDrop transfers files directly between devices connected to the same local n
 - Local QR connection with protocol version, device ID, private IPv4 host, port and name.
 - QR validation rejects unknown versions, malformed ports, invalid names and public hosts.
 - Persistent Room transfer queue that survives process restarts, recovers stale `RUNNING` items and retries transient failures with bounded backoff.
+- Multiple selected files are sent in one authenticated HTTP session with one incoming consent request.
 - Foreground Service keeps the local HTTP receiver and NSD listener active while the app is in the background.
 - Transfer notification showing local availability and active progress.
 - Settings for device name, port, default folder, automatic discovery, incoming confirmation and integrity checks.
