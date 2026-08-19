@@ -63,12 +63,14 @@ The debug APK is generated at `app/build/outputs/apk/debug/app-debug.apk`.
 
 ### Linux Rust client
 
-The native Rust sender requires Rust/Cargo only; its HTTP stack uses Rustls and does not require OpenSSL system libraries:
+The native Rust sender and graphical Linux app require Rust/Cargo. The HTTP stack uses Rustls and does not require OpenSSL system libraries:
 
 ```bash
 cd localdrop-linux-rust
 cargo test
 cargo build --release
+./target/release/localdrop-linux-rust-gui
+# o CLI:
 ./target/release/localdrop-linux-rust 'localdrop://connect?...' file1 file2
 ```
 
