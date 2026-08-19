@@ -31,6 +31,7 @@ import java.io.FileOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import java.io.RandomAccessFile
 import java.net.Socket
 import java.security.MessageDigest
 import java.util.UUID
@@ -52,6 +53,7 @@ class LocalDropRepositoryImpl(context: Context) : LocalDropRepository {
     private val _active = MutableStateFlow<TransferProgress?>(null)
     private val _settings = MutableStateFlow(LocalSettings(Build.MODEL.ifBlank { "Android" }, 0))
     private val pendingAnswers = ConcurrentHashMap<String, CompletableDeferred<IncomingDecision>>()
+    private val approvedSessions = ConcurrentHashMap<String, Uri>()
     private val destinationMutex = Mutex()
     private var discoveryJob: Job? = null
     private var queueJob: Job? = null
@@ -148,6 +150,7 @@ class LocalDropRepositoryImpl(context: Context) : LocalDropRepository {
     private suspend fun handleIncoming(request: IncomingRequest, body: InputStream, socket: Socket, headers: Map<String, String>) {
         val known = db.pairedDeviceDao().findById(request.device.id); val authenticated = isAuthenticated(request, known)
         if ((known?.paired == true && !authenticated) || (!_settings.value.confirmIncoming && !authenticated)) { request.files.forEach { addIncomingHistory(request, it, TransferState.FAILED, "Autenticación de dispositivo inválida") }; LocalHttpServer.writeResponse(socket, 401, "Authentication required"); return }
+        if (headers["x-localdrop-chunk"] == "1") { handleChunk(request, body, socket, headers, authenticated); return }
         val decision = CompletableDeferred<IncomingDecision>(); pendingAnswers[request.sessionId] = decision; _incoming.update { it + (request.sessionId to request) }
         if (!_settings.value.confirmIncoming) decision.complete(IncomingDecision(true, _settings.value.defaultFolder))
         val answer = withTimeoutOrNull(INCOMING_TIMEOUT_MS) { decision.await() } ?: IncomingDecision(false, null)
@@ -162,6 +165,41 @@ class LocalDropRepositoryImpl(context: Context) : LocalDropRepository {
             request.files.forEach { addIncomingHistory(request, it, state, error.message, it.sha256) }; LocalHttpServer.writeResponse(socket, 500, "Transfer failed")
         }
     }
+    private suspend fun handleChunk(request: IncomingRequest, body: InputStream, socket: Socket, headers: Map<String, String>, authenticated: Boolean) {
+        val folder = if (approvedSessions.containsKey(request.sessionId)) approvedSessions[request.sessionId]?.takeUnless { it == Uri.EMPTY } else run {
+            val decision = CompletableDeferred<IncomingDecision>(); pendingAnswers[request.sessionId] = decision; _incoming.update { it + (request.sessionId to request) }
+            if (!_settings.value.confirmIncoming) decision.complete(IncomingDecision(true, _settings.value.defaultFolder))
+            val answer = withTimeoutOrNull(INCOMING_TIMEOUT_MS) { decision.await() } ?: IncomingDecision(false, null)
+            pendingAnswers.remove(request.sessionId); _incoming.update { it - request.sessionId }
+            if (!answer.accepted) { request.files.forEach { addIncomingHistory(request, it, TransferState.REJECTED, "Rechazada por el usuario") }; LocalHttpServer.writeResponse(socket, 403, "Rejected"); return }
+            (answer.folder ?: _settings.value.defaultFolder).also { approvedSessions[request.sessionId] = it ?: Uri.EMPTY }
+        }
+        try {
+            val result = saveChunk(request, body, headers, folder)
+            if (result.completed) { addIncomingHistory(request, request.files[result.index], TransferState.COMPLETED, null, result.sha256); approvedSessions.remove(request.sessionId) }
+            LocalHttpServer.writeResponse(socket, 200, "OK", mapOf("X-LocalDrop-Next-Offset" to result.nextOffset.toString()))
+        } catch (error: Exception) { LocalHttpServer.writeResponse(socket, 500, "Chunk failed") }
+    }
+
+    private suspend fun saveChunk(request: IncomingRequest, body: InputStream, headers: Map<String, String>, folder: Uri?): ChunkResult = withContext(Dispatchers.IO) {
+        val index = headers["x-localdrop-file-index"]?.toIntOrNull() ?: error("Índice inválido")
+        val file = request.files.getOrNull(index) ?: error("Archivo inválido")
+        val offset = headers["x-localdrop-offset"]?.toLongOrNull() ?: error("Offset inválido")
+        val length = headers["content-length"]?.toLongOrNull() ?: error("Longitud inválida")
+        val directory = File(app.filesDir, "localdrop-sessions").apply { mkdirs() }
+        val temp = File(directory, "${request.sessionId.replace(Regex("[^a-zA-Z0-9_-]"), "_")}-$index.part")
+        val current = if (temp.exists()) temp.length() else 0L
+        if (offset > current) error("Falta un fragmento anterior")
+        if (offset < current) { var remaining = length; val discard = ByteArray(BUFFER_SIZE); while (remaining > 0) { val read = body.read(discard, 0, minOf(discard.size.toLong(), remaining).toInt()); if (read < 0) error("Fragmento incompleto"); remaining -= read }; return@withContext ChunkResult(index, current, current == file.size, null) }
+        RandomAccessFile(temp, "rw").use { random -> random.seek(offset); var remaining = length; val buffer = ByteArray(BUFFER_SIZE); while (remaining > 0) { ensureActive(); val read = body.read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt()); if (read < 0) error("Fragmento incompleto"); random.write(buffer, 0, read); remaining -= read } }
+        val next = temp.length(); if (next > file.size) error("Fragmento excede el tamaño")
+        if (next < file.size) return@withContext ChunkResult(index, next, false, null)
+        val sha = temp.inputStream().use { input -> val digest = MessageDigest.getInstance("SHA-256"); val buffer = ByteArray(BUFFER_SIZE); while (true) { val read = input.read(buffer); if (read < 0) break; digest.update(buffer, 0, read) }; digest.digest().joinToString("") { "%02x".format(it) } }
+        if (file.sha256 != null && !file.sha256.equals(sha, true)) error("SHA-256 no coincide: ${file.name}")
+        val destination = destinationMutex.withLock { createDestination(folder, file.name, file.mimeType) }; try { val output = openOutput(destination) ?: error("No se pudo crear ${file.name}"); output.use { out -> temp.inputStream().use { it.copyTo(out, BUFFER_SIZE) } }; finalizeDestination(destination); temp.delete() } catch (error: Exception) { deleteDestination(destination); throw error }
+        ChunkResult(index, next, true, sha)
+    }
+
     private fun isAuthenticated(request: IncomingRequest, known: PairedDeviceEntity?): Boolean {
         val publicKey = request.device.publicKey ?: return false; val fingerprint = request.device.fingerprint ?: return false
         if (known?.publicKey != null && known.publicKey != publicKey) return false
@@ -213,6 +251,7 @@ class LocalDropRepositoryImpl(context: Context) : LocalDropRepository {
     private fun SettingsEntity.toDomain() = LocalSettings(deviceName, port, defaultFolder?.let(Uri::parse), autoDiscovery, confirmIncoming, verifyIntegrity)
     private fun LocalSettings.toEntity() = SettingsEntity(1, deviceName, port, defaultFolder?.toString(), autoDiscovery, confirmIncoming, verifyIntegrity)
     private data class IncomingDecision(val accepted: Boolean, val folder: Uri?)
+    private data class ChunkResult(val index: Int, val nextOffset: Long, val completed: Boolean, val sha256: String?)
     private data class SaveResult(val files: List<SaveFile>)
     private data class SaveFile(val name: String, val sha256: String)
     private class IntegrityException(message: String) : IOException(message)
