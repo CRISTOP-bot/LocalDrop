@@ -1,0 +1,9 @@
+[project]
+name = "localdrop-linux"
+version = "0.1.0"
+description = "Cliente Linux para LocalDrop"
+requires-python = ">=3.10"
+dependencies = ["cryptography>=42.0"]
+
+[project.scripts]
+localdrop-linux = "localdrop_linux:main"
