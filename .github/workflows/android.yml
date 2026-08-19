@@ -1,10 +1,14 @@
-name: Android CI
+name: Android CI and Release
 
 on:
   push:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -25,3 +29,19 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
       - name: Build, test and lint
         run: gradle clean test assembleDebug lint --stacktrace
+      - name: Prepare release files
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk LocalDrop-debug.apk
+          sha256sum LocalDrop-debug.apk > LocalDrop-debug.apk.sha256
+      - name: Publish APK release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.1.${{ github.run_number }}
+          name: LocalDrop v0.1.${{ github.run_number }}
+          generate_release_notes: true
+          prerelease: true
+          files: |
+            LocalDrop-debug.apk
+            LocalDrop-debug.apk.sha256
