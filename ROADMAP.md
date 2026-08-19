@@ -14,8 +14,8 @@
 - [x] Clave pública y fingerprint visible en el QR y en solicitudes.
 - [x] Sesiones de subida firmadas con `SHA256withECDSA`.
 - [x] Un dispositivo emparejado exige clave pública, fingerprint y firma válidos.
-- [ ] Confirmación explícita de pairing desde ambos dispositivos.
-- [ ] Nonce de desafío firmado por sesión de recepción.
+- [x] Confirmación explícita de pairing desde ambos dispositivos.
+- [x] Nonce de desafío firmado por sesión de pairing.
 - [x] UI para revocar dispositivos emparejados.
 - [ ] No aceptar automáticamente dispositivos solo descubiertos.
 
