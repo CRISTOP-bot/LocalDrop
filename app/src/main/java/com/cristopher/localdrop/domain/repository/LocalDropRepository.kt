@@ -17,6 +17,7 @@ interface LocalDropRepository {
     suspend fun send(files: List<TransferFile>, device: LocalDevice)
     suspend fun answerIncoming(sessionId: String, accepted: Boolean, folder: Uri?)
     suspend fun pairDevice(device: LocalDevice)
+    suspend fun revokeDevice(deviceId: String)
     suspend fun updateSettings(settings: LocalSettings)
     suspend fun deleteHistory(id: Long)
     fun cancelTransfer()
