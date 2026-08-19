@@ -15,6 +15,7 @@ import androidx.documentfile.provider.DocumentFile
 import com.cristopher.localdrop.data.discovery.NsdDiscoveryDataSource
 import com.cristopher.localdrop.data.local.*
 import com.cristopher.localdrop.data.network.LocalHttpServer
+import com.cristopher.localdrop.data.security.LocalIdentityStore
 import com.cristopher.localdrop.data.transfer.HttpTransferDataSource
 import com.cristopher.localdrop.data.transfer.TransferService
 import com.cristopher.localdrop.domain.model.*
@@ -44,6 +45,8 @@ class LocalDropRepositoryImpl(context: Context) : LocalDropRepository {
     private val server = LocalHttpServer(scope, ::handleIncoming)
     private val uploader = HttpTransferDataSource(app.contentResolver)
     private val deviceId = android.provider.Settings.Secure.getString(app.contentResolver, android.provider.Settings.Secure.ANDROID_ID)?.takeIf { it.isNotBlank() } ?: UUID.randomUUID().toString()
+    private val identityStore = LocalIdentityStore(app, deviceId)
+    private val _identity = MutableStateFlow(identityStore.identity)
     private val _devices = MutableStateFlow<List<LocalDevice>>(emptyList())
     private val _incoming = MutableStateFlow<Map<String, IncomingRequest>>(emptyMap())
     private val _active = MutableStateFlow<TransferProgress?>(null)
@@ -62,6 +65,7 @@ class LocalDropRepositoryImpl(context: Context) : LocalDropRepository {
     override val incomingRequests: Flow<List<IncomingRequest>> = _incoming.map { it.values.toList() }.stateIn(scope, SharingStarted.Eagerly, emptyList())
     override val activeTransfer: Flow<TransferProgress?> = _active.asStateFlow()
     override val settings: Flow<LocalSettings> = _settings.asStateFlow()
+    override val localIdentity: Flow<LocalIdentity> = _identity.asStateFlow()
     override val history: Flow<List<TransferHistory>> = db.historyDao().observeAll().map { list -> list.map { it.toDomain() } }
 
     init {
@@ -128,13 +132,12 @@ class LocalDropRepositoryImpl(context: Context) : LocalDropRepository {
         discoveryJob?.cancel()
         discoveryJob = scope.launch {
             nsd.discover(deviceId).collect { discovered ->
-                val previous = _devices.value
-                val merged = discovered.map { device -> device.copy(paired = previous.firstOrNull { it.id == device.id }?.paired == true) }
-                _devices.value = merged
-                merged.forEach { device ->
+                val merged = discovered.map { device ->
                     val old = db.pairedDeviceDao().findById(device.id)
-                    db.pairedDeviceDao().upsert(device.toEntity(old?.paired == true))
+                    device.copy(paired = old?.paired == true, publicKey = old?.publicKey, fingerprint = old?.fingerprint)
                 }
+                _devices.value = merged
+                merged.forEach { device -> db.pairedDeviceDao().upsert(device.toEntity(device.paired)) }
             }
         }
     }
@@ -180,7 +183,8 @@ class LocalDropRepositoryImpl(context: Context) : LocalDropRepository {
                 try {
                     _active.value = TransferProgress(file.name, 0, file.size, state = TransferState.RUNNING)
                     notifyProgress(_active.value)
-                    sha256 = uploader.upload(device.host, device.port, UUID.randomUUID().toString(), deviceId, _settings.value.deviceName, file.uri, file.name, file.mimeType, file.size, _settings.value.verifyIntegrity) { progress ->
+                    val sessionId = UUID.randomUUID().toString()
+                    sha256 = uploader.upload(device.host, device.port, sessionId, deviceId, _settings.value.deviceName, _identity.value.publicKey, _identity.value.fingerprint, identityStore::sign, file.uri, file.name, file.mimeType, file.size, _settings.value.verifyIntegrity) { progress ->
                         _active.value = progress
                         notifyProgress(progress)
                     }
@@ -217,6 +221,13 @@ class LocalDropRepositoryImpl(context: Context) : LocalDropRepository {
     }
 
     private suspend fun handleIncoming(request: IncomingRequest, body: InputStream, socket: Socket, headers: Map<String, String>) {
+        val known = db.pairedDeviceDao().findById(request.device.id)
+        val authenticated = isAuthenticated(request, known)
+        if ((known?.paired == true && !authenticated) || (!_settings.value.confirmIncoming && !authenticated)) {
+            addIncomingHistory(request, TransferState.FAILED, "Autenticación de dispositivo inválida")
+            LocalHttpServer.writeResponse(socket, 401, "Authentication required")
+            return
+        }
         val decision = CompletableDeferred<IncomingDecision>()
         pendingAnswers[request.sessionId] = decision
         _incoming.update { it + (request.sessionId to request) }
@@ -234,6 +245,16 @@ class LocalDropRepositoryImpl(context: Context) : LocalDropRepository {
             addIncomingHistory(request, state, error.message, request.files.first().sha256)
             LocalHttpServer.writeResponse(socket, 500, "Transfer failed")
         }
+    }
+
+    private fun isAuthenticated(request: IncomingRequest, known: PairedDeviceEntity?): Boolean {
+        val publicKey = request.device.publicKey ?: return false
+        val fingerprint = request.device.fingerprint ?: return false
+        if (known?.publicKey != null && known.publicKey != publicKey) return false
+        if (known?.fingerprint != null && known.fingerprint != fingerprint) return false
+        val expected = request.files.first()
+        val message = "${request.sessionId}|${expected.name}|${expected.size}|${expected.sha256.orEmpty()}"
+        return request.signature?.let { LocalIdentityStore.verify(publicKey, message, it) } == true
     }
 
     private suspend fun saveStream(request: IncomingRequest, body: InputStream, folder: Uri?, total: Long): SaveResult = withContext(Dispatchers.IO) {
@@ -329,7 +350,7 @@ class LocalDropRepositoryImpl(context: Context) : LocalDropRepository {
     }
     private fun clearNotification() { app.getSystemService(NotificationManager::class.java).cancel(NOTIFICATION_ID) }
     private fun deviceType(): DeviceType = if (app.resources.configuration.smallestScreenWidthDp >= 600) DeviceType.TABLET else DeviceType.PHONE
-    private fun LocalDevice.toEntity(paired: Boolean) = PairedDeviceEntity(id, name, host, port, System.currentTimeMillis(), paired)
+    private fun LocalDevice.toEntity(paired: Boolean) = PairedDeviceEntity(id, name, host, port, System.currentTimeMillis(), paired, publicKey, fingerprint)
     private fun HistoryEntity.toDomain() = TransferHistory(id, fileName, size, timestamp, deviceName, TransferDirection.valueOf(direction), TransferState.valueOf(state), error, sha256)
     private fun SettingsEntity.toDomain() = LocalSettings(deviceName, port, defaultFolder?.let(Uri::parse), autoDiscovery, confirmIncoming, verifyIntegrity)
     private fun LocalSettings.toEntity() = SettingsEntity(1, deviceName, port, defaultFolder?.toString(), autoDiscovery, confirmIncoming, verifyIntegrity)
