@@ -18,6 +18,23 @@ data class HistoryEntity(
     val sha256: String? = null
 )
 
+@Entity(tableName = "queued_transfers")
+data class QueuedTransferEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val uri: String,
+    val fileName: String,
+    val size: Long,
+    val mimeType: String,
+    val deviceId: String,
+    val deviceName: String,
+    val host: String,
+    val port: Int,
+    val createdAt: Long,
+    val state: String = "PENDING",
+    val attempts: Int = 0,
+    val lastError: String? = null
+)
+
 @Entity(tableName = "paired_devices")
 data class PairedDeviceEntity(
     @PrimaryKey val id: String,
@@ -49,6 +66,17 @@ interface HistoryDao {
 }
 
 @Dao
+interface TransferQueueDao {
+    @Query("SELECT * FROM queued_transfers WHERE state = 'PENDING' ORDER BY createdAt ASC LIMIT 1") suspend fun nextPending(): QueuedTransferEntity?
+    @Insert suspend fun insertAll(items: List<QueuedTransferEntity>)
+    @Query("UPDATE queued_transfers SET state = 'PENDING', lastError = NULL WHERE state = 'RUNNING'") suspend fun resetRunning()
+    @Query("UPDATE queued_transfers SET state = 'RUNNING', attempts = attempts + 1 WHERE id = :id") suspend fun markRunning(id: Long)
+    @Query("UPDATE queued_transfers SET state = :state, lastError = :error WHERE id = :id") suspend fun markFinished(id: Long, state: String, error: String?)
+    @Query("UPDATE queued_transfers SET state = 'PENDING', lastError = :error WHERE id = :id") suspend fun retry(id: Long, error: String)
+    @Query("DELETE FROM queued_transfers WHERE id = :id") suspend fun delete(id: Long)
+}
+
+@Dao
 interface SettingsDao {
     @Query("SELECT * FROM local_settings WHERE id = 1") fun observe(): Flow<SettingsEntity?>
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun save(settings: SettingsEntity)
@@ -62,9 +90,10 @@ interface PairedDeviceDao {
     @Query("UPDATE paired_devices SET paired = 1, publicKey = :publicKey, fingerprint = :fingerprint WHERE id = :id") suspend fun markPaired(id: String, publicKey: String, fingerprint: String)
 }
 
-@Database(entities = [HistoryEntity::class, PairedDeviceEntity::class, SettingsEntity::class], version = 3, exportSchema = false)
+@Database(entities = [HistoryEntity::class, QueuedTransferEntity::class, PairedDeviceEntity::class, SettingsEntity::class], version = 4, exportSchema = false)
 abstract class LocalDropDatabase : RoomDatabase() {
     abstract fun historyDao(): HistoryDao
+    abstract fun transferQueueDao(): TransferQueueDao
     abstract fun settingsDao(): SettingsDao
     abstract fun pairedDeviceDao(): PairedDeviceDao
     companion object {
@@ -82,7 +111,12 @@ abstract class LocalDropDatabase : RoomDatabase() {
                 database.execSQL("ALTER TABLE paired_devices ADD COLUMN fingerprint TEXT")
             }
         }
+        private val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("CREATE TABLE IF NOT EXISTS queued_transfers (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, uri TEXT NOT NULL, fileName TEXT NOT NULL, size INTEGER NOT NULL, mimeType TEXT NOT NULL, deviceId TEXT NOT NULL, deviceName TEXT NOT NULL, host TEXT NOT NULL, port INTEGER NOT NULL, createdAt INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'PENDING', attempts INTEGER NOT NULL DEFAULT 0, lastError TEXT)")
+            }
+        }
         fun create(context: android.content.Context): LocalDropDatabase = Room.databaseBuilder(context, LocalDropDatabase::class.java, "localdrop.db")
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3).fallbackToDestructiveMigration().build()
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).fallbackToDestructiveMigration().build()
     }
 }
