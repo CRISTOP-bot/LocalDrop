@@ -13,7 +13,7 @@ import java.net.Socket
 import java.util.Base64
 import java.util.UUID
 
-class LocalHttpServer(private val scope: CoroutineScope, private val onRequest: suspend (IncomingRequest, InputStream, Socket, Map<String, String>) -> Unit) {
+class LocalHttpServer(private val scope: CoroutineScope, private val onRequest: suspend (IncomingRequest, InputStream, Socket, Map<String, String>) -> Unit, private val onPairing: suspend (String, Socket, Map<String, String>) -> Unit) {
     private var server: ServerSocket? = null
     var port: Int = 0; private set
 
@@ -39,8 +39,11 @@ class LocalHttpServer(private val scope: CoroutineScope, private val onRequest: 
             val sessionUpload = requestLine.startsWith("POST /upload-session")
             val singleUpload = requestLine.startsWith("POST /upload")
             val chunkUpload = requestLine.startsWith("POST /upload-chunk")
-            if (!sessionUpload && !singleUpload && !chunkUpload) { writeResponse(s, 404, "Not found"); return }
+            val challenge = requestLine.startsWith("GET /pair-challenge")
+            val confirmation = requestLine.startsWith("POST /pair-confirm")
+            if (!sessionUpload && !singleUpload && !chunkUpload && !challenge && !confirmation) { writeResponse(s, 404, "Not found"); return }
             val headers = lines.drop(1).filter { it.contains(':') }.associate { it.substringBefore(':').trim().lowercase() to it.substringAfter(':').trim() }
+            if (challenge || confirmation) { onPairing(if (challenge) "challenge" else "confirm", s, headers); return }
             val session = headers["x-localdrop-session"]?.takeIf { it.length in 8..100 } ?: UUID.randomUUID().toString()
             val manifest = runCatching { if (sessionUpload || chunkUpload) decodeManifest(headers["x-localdrop-manifest"]) else singleManifest(headers) }.getOrElse { writeResponse(s, 400, "Invalid manifest"); return }
             val files = runCatching { TransferManifest.decode(manifest) }.getOrElse { writeResponse(s, 400, "Invalid manifest"); return }
