@@ -57,6 +57,15 @@ Open `LocalDrop/` in Android Studio or run:
 
 The debug APK is generated at `app/build/outputs/apk/debug/app-debug.apk`.
 
+### GitHub Releases
+
+Every push to `main` runs the complete build, tests and lint. If everything passes, GitHub Actions creates a prerelease automatically with a tag such as `v0.1.12` and attaches:
+
+- `LocalDrop-debug.apk`
+- `LocalDrop-debug.apk.sha256`
+
+Pull requests only run verification and do not publish releases. You can also start the workflow manually from the **Actions** tab.
+
 ## Usage
 
 1. Install LocalDrop on both devices and connect them to the same Wi-Fi.
