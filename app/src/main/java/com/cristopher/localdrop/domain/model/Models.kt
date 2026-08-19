@@ -51,7 +51,8 @@ data class IncomingRequest(
     val sessionId: String,
     val device: LocalDevice,
     val files: List<IncomingFile>,
-    val signature: String? = null
+    val signature: String? = null,
+    val manifest: String? = null
 )
 
 data class IncomingFile(val name: String, val size: Long, val mimeType: String, val sha256: String? = null)
