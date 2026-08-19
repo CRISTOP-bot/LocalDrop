@@ -90,6 +90,7 @@ interface PairedDeviceDao {
     @Query("SELECT * FROM paired_devices WHERE id = :id LIMIT 1") suspend fun findById(id: String): PairedDeviceEntity?
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsert(device: PairedDeviceEntity)
     @Query("UPDATE paired_devices SET paired = 1, publicKey = :publicKey, fingerprint = :fingerprint WHERE id = :id") suspend fun markPaired(id: String, publicKey: String, fingerprint: String)
+    @Query("UPDATE paired_devices SET paired = 0, publicKey = NULL, fingerprint = NULL WHERE id = :id") suspend fun revoke(id: String)
 }
 
 @Database(entities = [HistoryEntity::class, QueuedTransferEntity::class, PairedDeviceEntity::class, SettingsEntity::class], version = 5, exportSchema = false)
