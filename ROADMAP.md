@@ -40,6 +40,6 @@
 ## Fase 5 — calidad de producto
 
 - [ ] Tests instrumentados de NSD, SAF, MediaStore y dos dispositivos.
-- [ ] Tema claro/oscuro/sistema.
+- [x] Tema claro/oscuro/sistema con preferencia persistente.
 - [ ] UI optimizada para tablet y horizontal.
 - [ ] Métricas locales de transferencia sin datos externos.
