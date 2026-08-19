@@ -35,6 +35,13 @@ jobs:
           sudo apt-get install -y cmake g++ libcurl4-openssl-dev libssl-dev
           cmake -S desktop-cpp -B desktop-cpp/build
           cmake --build desktop-cpp/build --parallel
+      - name: Build Linux Rust client
+        uses: dtolnay/rust-toolchain@stable
+      - name: Test and build Rust client
+        working-directory: localdrop-linux-rust
+        run: |
+          cargo test
+          cargo build --release
       - name: Prepare release files
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
