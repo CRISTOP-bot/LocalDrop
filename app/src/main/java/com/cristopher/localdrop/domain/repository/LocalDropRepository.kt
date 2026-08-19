@@ -10,6 +10,7 @@ interface LocalDropRepository {
     val incomingRequests: Flow<List<IncomingRequest>>
     val activeTransfer: Flow<TransferProgress?>
     val settings: Flow<LocalSettings>
+    val localIdentity: Flow<LocalIdentity>
     suspend fun start()
     suspend fun stop()
     suspend fun refreshDevices()
