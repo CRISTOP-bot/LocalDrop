@@ -26,13 +26,24 @@ sudo apt install cargo rustc
 cargo build --release
 ```
 
-El binario queda en:
+Los binarios quedan en:
 
 ```text
 target/release/localdrop-linux-rust
+target/release/localdrop-linux-rust-gui
 ```
 
-## Ejecutar
+## Interfaz gráfica
+
+La interfaz gráfica está inspirada en la app Android: muestra el QR, los archivos seleccionados, el dispositivo conectado, el estado de pairing y el botón de envío.
+
+```bash
+./target/release/localdrop-linux-rust-gui
+```
+
+Requiere un entorno gráfico Linux y soporte de portal XDG para el selector de archivos.
+
+## Ejecutar CLI
 
 Copia el contenido de un QR `localdrop://connect?...` de LocalDrop Android:
 
