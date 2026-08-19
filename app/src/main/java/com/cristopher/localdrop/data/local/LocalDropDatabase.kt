@@ -56,7 +56,8 @@ data class SettingsEntity(
     val defaultFolder: String?,
     val autoDiscovery: Boolean,
     val confirmIncoming: Boolean,
-    val verifyIntegrity: Boolean = true
+    val verifyIntegrity: Boolean = true,
+    val theme: String = "SYSTEM"
 )
 
 @Dao
@@ -93,7 +94,7 @@ interface PairedDeviceDao {
     @Query("UPDATE paired_devices SET paired = 0, publicKey = NULL, fingerprint = NULL WHERE id = :id") suspend fun revoke(id: String)
 }
 
-@Database(entities = [HistoryEntity::class, QueuedTransferEntity::class, PairedDeviceEntity::class, SettingsEntity::class], version = 5, exportSchema = false)
+@Database(entities = [HistoryEntity::class, QueuedTransferEntity::class, PairedDeviceEntity::class, SettingsEntity::class], version = 6, exportSchema = false)
 abstract class LocalDropDatabase : RoomDatabase() {
     abstract fun historyDao(): HistoryDao
     abstract fun transferQueueDao(): TransferQueueDao
@@ -122,7 +123,8 @@ abstract class LocalDropDatabase : RoomDatabase() {
         private val MIGRATION_4_5 = object : Migration(4, 5) {
             override fun migrate(database: SupportSQLiteDatabase) { database.execSQL("ALTER TABLE queued_transfers ADD COLUMN batchId TEXT NOT NULL DEFAULT ''") }
         }
+        private val MIGRATION_5_6 = object : Migration(5, 6) { override fun migrate(database: SupportSQLiteDatabase) { database.execSQL("ALTER TABLE local_settings ADD COLUMN theme TEXT NOT NULL DEFAULT 'SYSTEM'") } }
         fun create(context: android.content.Context): LocalDropDatabase = Room.databaseBuilder(context, LocalDropDatabase::class.java, "localdrop.db")
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5).fallbackToDestructiveMigration().build()
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6).fallbackToDestructiveMigration().build()
     }
 }
