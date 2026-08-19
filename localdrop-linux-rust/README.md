@@ -35,7 +35,7 @@ target/release/localdrop-linux-rust-gui
 
 ## Interfaz gráfica
 
-La interfaz gráfica está inspirada en la app Android: muestra el QR, los archivos seleccionados, el dispositivo conectado, el estado de pairing y el botón de envío.
+La interfaz gráfica está inspirada en la app Android: muestra el QR de Linux para conectarse desde un celular, los archivos seleccionados, el dispositivo conectado, el estado de pairing y el botón de envío. También mantiene un receptor HTTP local para que Android pueda enviar archivos a Linux.
 
 ```bash
 ./target/release/localdrop-linux-rust-gui
