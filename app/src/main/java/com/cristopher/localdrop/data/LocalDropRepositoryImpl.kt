@@ -32,7 +32,9 @@ import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.io.RandomAccessFile
+import java.net.HttpURLConnection
 import java.net.Socket
+import java.net.URL
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -43,7 +45,7 @@ class LocalDropRepositoryImpl(context: Context) : LocalDropRepository {
     private val connectivity = app.getSystemService(ConnectivityManager::class.java)
     private val db = LocalDropDatabase.create(app)
     private val nsd = NsdDiscoveryDataSource(app)
-    private val server = LocalHttpServer(scope, ::handleIncoming)
+    private val server = LocalHttpServer(scope, ::handleIncoming, ::handlePairing)
     private val uploader = HttpTransferDataSource(app.contentResolver)
     private val deviceId = android.provider.Settings.Secure.getString(app.contentResolver, android.provider.Settings.Secure.ANDROID_ID)?.takeIf { it.isNotBlank() } ?: UUID.randomUUID().toString()
     private val identityStore = LocalIdentityStore(app, deviceId)
@@ -145,7 +147,27 @@ class LocalDropRepositoryImpl(context: Context) : LocalDropRepository {
     }
 
     override suspend fun answerIncoming(sessionId: String, accepted: Boolean, folder: Uri?) { pendingAnswers.remove(sessionId)?.complete(IncomingDecision(accepted, folder)); _incoming.update { it - sessionId } }
-    override suspend fun pairDevice(device: LocalDevice) { val paired = device.copy(paired = true); _devices.update { list -> list.filterNot { it.id == paired.id } + paired }; db.pairedDeviceDao().upsert(paired.toEntity(true)) }
+    private suspend fun handlePairing(kind: String, socket: Socket, headers: Map<String, String>) {
+        if (kind == "challenge") {
+            val nonce = UUID.randomUUID().toString(); LocalHttpServer.writeResponse(socket, 200, "OK", mapOf("X-LocalDrop-Nonce" to nonce, "X-LocalDrop-Public-Key" to _identity.value.publicKey, "X-LocalDrop-Fingerprint" to _identity.value.fingerprint, "X-LocalDrop-Signature" to identityStore.sign(nonce))); return
+        }
+        val nonce = headers["x-localdrop-nonce"].orEmpty(); val publicKey = headers["x-localdrop-public-key"].orEmpty(); val fingerprint = headers["x-localdrop-fingerprint"].orEmpty(); val signature = headers["x-localdrop-signature"].orEmpty()
+        val valid = runCatching { nonce.isNotBlank() && LocalIdentityStore.verify(publicKey, nonce, signature) && fingerprint == LocalIdentityStore.fingerprint(java.util.Base64.getUrlDecoder().decode(publicKey)) }.getOrDefault(false)
+        if (!valid) { LocalHttpServer.writeResponse(socket, 401, "Invalid pairing proof"); return }
+        val device = LocalDevice(headers["x-localdrop-device-id"] ?: "unknown", headers["x-localdrop-device-name"] ?: "Dispositivo confiable", socket.inetAddress.hostAddress ?: "?", headers["x-localdrop-port"]?.toIntOrNull() ?: 0, paired = true, publicKey = publicKey, fingerprint = fingerprint)
+        db.pairedDeviceDao().upsert(device.toEntity(true)); _devices.update { list -> list.filterNot { it.id == device.id } + device }; LocalHttpServer.writeResponse(socket, 200, "OK")
+    }
+
+    private suspend fun completePairing(device: LocalDevice) = withContext(Dispatchers.IO) {
+        val publicKey = device.publicKey ?: error("El QR no contiene clave pública")
+        val challenge = (URL("http://${device.host}:${device.port}/pair-challenge").openConnection() as HttpURLConnection).apply { connectTimeout = 8_000; readTimeout = 8_000; requestMethod = "GET" }
+        val code = challenge.responseCode; val nonce = challenge.getHeaderField("X-LocalDrop-Nonce").orEmpty(); val remoteSignature = challenge.getHeaderField("X-LocalDrop-Signature").orEmpty(); val remoteFingerprint = challenge.getHeaderField("X-LocalDrop-Fingerprint").orEmpty(); challenge.disconnect()
+        if (code !in 200..299 || remoteFingerprint != device.fingerprint || !LocalIdentityStore.verify(publicKey, nonce, remoteSignature)) error("No se pudo verificar el desafío del dispositivo")
+        val confirm = (URL("http://${device.host}:${device.port}/pair-confirm").openConnection() as HttpURLConnection).apply { requestMethod = "POST"; doOutput = true; connectTimeout = 8_000; readTimeout = 8_000; setFixedLengthStreamingMode(0); setRequestProperty("X-LocalDrop-Nonce", nonce); setRequestProperty("X-LocalDrop-Device-Id", deviceId); setRequestProperty("X-LocalDrop-Device-Name", _settings.value.deviceName); setRequestProperty("X-LocalDrop-Port", server.port.toString()); setRequestProperty("X-LocalDrop-Public-Key", _identity.value.publicKey); setRequestProperty("X-LocalDrop-Fingerprint", _identity.value.fingerprint); setRequestProperty("X-LocalDrop-Signature", identityStore.sign(nonce)) }
+        try { confirm.outputStream.use { }; if (confirm.responseCode !in 200..299) error("El otro dispositivo rechazó el emparejamiento") } finally { confirm.disconnect() }
+    }
+
+    override suspend fun pairDevice(device: LocalDevice) { completePairing(device); val paired = device.copy(paired = true); _devices.update { list -> list.filterNot { it.id == paired.id } + paired }; db.pairedDeviceDao().upsert(paired.toEntity(true)) }
     override suspend fun revokeDevice(deviceId: String) { db.pairedDeviceDao().revoke(deviceId); _devices.update { list -> list.map { if (it.id == deviceId) it.copy(paired = false, publicKey = null, fingerprint = null) else it } } }
 
     private suspend fun handleIncoming(request: IncomingRequest, body: InputStream, socket: Socket, headers: Map<String, String>) {
