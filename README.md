@@ -81,9 +81,9 @@ For Android Share Sheet, choose **Compartir → LocalDrop**. The app reads the s
 
 The app binds a local `ServerSocket`, advertises it through NSD and connects only to private IPv4 addresses. Public Internet addresses, malformed QR data and unvalidated ports are rejected. Incoming transfers require visible user consent by default and show the origin device and file list before writing anything.
 
-Every transfer gets a temporary UUID session. The code keeps discovered and paired devices distinct: NSD discovery alone does not mark a device as paired; QR pairing stores the explicit pairing state in Room.
+Every transfer gets a temporary UUID session. The code keeps discovered and paired devices distinct: NSD discovery alone does not mark a device as paired; QR pairing stores the explicit pairing state in Room. Each device also creates a persistent P-256 identity in Android Keystore. Uploads include the public key, fingerprint and an `SHA256withECDSA` signature over the session metadata. Known paired devices are rejected if the key, fingerprint or signature is invalid.
 
-The MVP uses cleartext HTTP because traffic is local and the protocol is implemented over a private LAN. This is not a substitute for authenticated encryption on hostile networks. The architecture leaves room for a future `Device → Public Key → Fingerprint → Pairing → Authenticated Session` flow and does not use homemade cryptography.
+The MVP uses cleartext HTTP because traffic is local and the protocol is implemented over a private LAN. This is not a substitute for authenticated encryption on hostile networks. Public-key authentication is now applied to paired uploads; mutual challenge-response, pairing revocation and encrypted transport remain on the roadmap. No homemade cryptography is used.
 
 ## Project structure
 
