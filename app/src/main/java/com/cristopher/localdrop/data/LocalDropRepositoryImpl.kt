@@ -4,6 +4,8 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.ContentValues
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -19,8 +21,8 @@ import com.cristopher.localdrop.domain.model.*
 import com.cristopher.localdrop.domain.repository.LocalDropRepository
 import com.cristopher.localdrop.utils.uniqueFileName
 import kotlinx.coroutines.*
-import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.File
@@ -36,6 +38,7 @@ import java.util.concurrent.ConcurrentHashMap
 class LocalDropRepositoryImpl(context: Context) : LocalDropRepository {
     private val app = context.applicationContext
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val connectivity = app.getSystemService(ConnectivityManager::class.java)
     private val db = LocalDropDatabase.create(app)
     private val nsd = NsdDiscoveryDataSource(app)
     private val server = LocalHttpServer(scope, ::handleIncoming)
@@ -51,6 +54,8 @@ class LocalDropRepositoryImpl(context: Context) : LocalDropRepository {
     private var discoveryJob: Job? = null
     private var queueJob: Job? = null
     private var currentTransferJob: Job? = null
+    private var networkRestartJob: Job? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private var started = false
 
     override val devices: Flow<List<LocalDevice>> = _devices.asStateFlow()
@@ -72,6 +77,11 @@ class LocalDropRepositoryImpl(context: Context) : LocalDropRepository {
     override suspend fun start() {
         if (started) return
         started = true
+        startNetworkStack()
+        registerNetworkCallback()
+    }
+
+    private suspend fun startNetworkStack() {
         val configured = _settings.value
         runCatching { server.start(configured.port) }.getOrElse { server.start(0) }
         val effective = configured.copy(port = server.port)
@@ -79,6 +89,39 @@ class LocalDropRepositoryImpl(context: Context) : LocalDropRepository {
         db.settingsDao().save(effective.toEntity())
         nsd.register(effective.deviceName, server.port, deviceId, deviceType())
         if (effective.autoDiscovery) startDiscovery()
+    }
+
+    private fun registerNetworkCallback() {
+        if (networkCallback != null || connectivity == null) return
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) = scheduleNetworkRestart()
+            override fun onLinkPropertiesChanged(network: Network, properties: android.net.LinkProperties) = scheduleNetworkRestart()
+            override fun onLost(network: Network) {
+                _devices.value = _devices.value.map { it.copy(status = DeviceStatus.DISCONNECTED) }
+                scheduleNetworkRestart()
+            }
+        }
+        networkCallback = callback
+        runCatching { connectivity.registerDefaultNetworkCallback(callback) }
+            .onFailure { networkCallback = null }
+    }
+
+    private fun scheduleNetworkRestart() {
+        if (!started) return
+        networkRestartJob?.cancel()
+        networkRestartJob = scope.launch {
+            delay(NETWORK_DEBOUNCE_MS)
+            restartNetworkStack()
+        }
+    }
+
+    private suspend fun restartNetworkStack() {
+        if (!started) return
+        discoveryJob?.cancelAndJoin()
+        discoveryJob = null
+        nsd.stopDiscovery()
+        server.close()
+        startNetworkStack()
     }
 
     private fun startDiscovery() {
@@ -97,12 +140,21 @@ class LocalDropRepositoryImpl(context: Context) : LocalDropRepository {
     }
 
     override suspend fun stop() {
+        networkRestartJob?.cancelAndJoin()
+        networkRestartJob = null
+        unregisterNetworkCallback()
         discoveryJob?.cancelAndJoin()
         discoveryJob = null
         nsd.stopDiscovery()
         nsd.unregister()
         server.close()
         started = false
+    }
+
+    private fun unregisterNetworkCallback() {
+        val callback = networkCallback ?: return
+        runCatching { connectivity?.unregisterNetworkCallback(callback) }
+        networkCallback = null
     }
 
     override suspend fun refreshDevices() {
@@ -251,10 +303,7 @@ class LocalDropRepositoryImpl(context: Context) : LocalDropRepository {
 
     private fun openOutput(uri: Uri): OutputStream? = if (uri.scheme == "file") FileOutputStream(requireNotNull(uri.path)) else app.contentResolver.openOutputStream(uri, "w")
     private fun finalizeDestination(uri: Uri) { if (Build.VERSION.SDK_INT >= 29 && uri.authority == "media") app.contentResolver.update(uri, ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }, null, null) }
-
-    private fun deleteDestination(uri: Uri) {
-        if (uri.scheme == "file") File(uri.path.orEmpty()).delete() else app.contentResolver.delete(uri, null, null)
-    }
+    private fun deleteDestination(uri: Uri) { if (uri.scheme == "file") File(uri.path.orEmpty()).delete() else app.contentResolver.delete(uri, null, null) }
 
     private suspend fun addHistory(file: TransferFile, deviceName: String, direction: TransferDirection, state: TransferState, error: String?, sha256: String?) = db.historyDao().insert(HistoryEntity(fileName = file.name, size = file.size, timestamp = System.currentTimeMillis(), deviceName = deviceName, direction = direction.name, state = state.name, error = error, sha256 = sha256))
     private suspend fun addIncomingHistory(request: IncomingRequest, state: TransferState, error: String?, sha256: String? = null) = db.historyDao().insert(HistoryEntity(fileName = request.files.first().name, size = request.files.first().size, timestamp = System.currentTimeMillis(), deviceName = request.device.name, direction = TransferDirection.RECEIVED.name, state = state.name, error = error, sha256 = sha256))
@@ -268,8 +317,8 @@ class LocalDropRepositoryImpl(context: Context) : LocalDropRepository {
     override fun cancelTransfer() { currentTransferJob?.cancel() }
 
     override fun close() {
-        discoveryJob?.cancel(); currentTransferJob?.cancel(); queueJob?.cancel(); transferQueue.close(); pendingAnswers.values.forEach { it.cancel() }; pendingAnswers.clear(); _incoming.value = emptyMap()
-        nsd.unregister(); server.close(); scope.cancel(); db.close(); TransferService.stop(app); started = false
+        discoveryJob?.cancel(); networkRestartJob?.cancel(); currentTransferJob?.cancel(); queueJob?.cancel(); transferQueue.close(); pendingAnswers.values.forEach { it.cancel() }; pendingAnswers.clear(); _incoming.value = emptyMap()
+        unregisterNetworkCallback(); nsd.unregister(); server.close(); scope.cancel(); db.close(); TransferService.stop(app); started = false
     }
 
     private fun notifyProgress(progress: TransferProgress?) {
@@ -288,5 +337,5 @@ class LocalDropRepositoryImpl(context: Context) : LocalDropRepository {
     private data class IncomingDecision(val accepted: Boolean, val folder: Uri?)
     private data class SaveResult(val uri: Uri, val sha256: String)
     private class IntegrityException(message: String) : IOException(message)
-    companion object { private const val BUFFER_SIZE = 64 * 1024; private const val INCOMING_TIMEOUT_MS = 120_000L; private const val CHANNEL_ID = "localdrop_transfer"; private const val NOTIFICATION_ID = 42 }
+    companion object { private const val BUFFER_SIZE = 64 * 1024; private const val INCOMING_TIMEOUT_MS = 120_000L; private const val NETWORK_DEBOUNCE_MS = 600L; private const val CHANNEL_ID = "localdrop_transfer"; private const val NOTIFICATION_ID = 42 }
 }
