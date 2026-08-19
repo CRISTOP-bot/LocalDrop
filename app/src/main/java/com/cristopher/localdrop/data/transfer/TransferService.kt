@@ -10,12 +10,13 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 
+/** Keeps the LocalDrop process alive while its local HTTP receiver and NSD listener are active. */
 class TransferService : Service() {
     override fun onCreate() {
         super.onCreate()
         val manager = getSystemService(NotificationManager::class.java)
-        if (Build.VERSION.SDK_INT >= 26) manager.createNotificationChannel(NotificationChannel(CHANNEL_ID, "Transferencias LocalDrop", NotificationManager.IMPORTANCE_LOW))
-        startForeground(NOTIFICATION_ID, notification("Preparando transferencia…"))
+        if (Build.VERSION.SDK_INT >= 26) manager.createNotificationChannel(NotificationChannel(CHANNEL_ID, "LocalDrop en red local", NotificationManager.IMPORTANCE_LOW))
+        startForeground(NOTIFICATION_ID, notification("Disponible en la red local"))
     }
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_NOT_STICKY
     override fun onBind(intent: Intent?): IBinder? = null
