@@ -47,6 +47,9 @@ jobs:
         run: |
           cp app/build/outputs/apk/debug/app-debug.apk LocalDrop-debug.apk
           sha256sum LocalDrop-debug.apk > LocalDrop-debug.apk.sha256
+          cp localdrop-linux-rust/target/release/localdrop-linux-rust localdrop-linux-rust
+          chmod +x localdrop-linux-rust
+          sha256sum localdrop-linux-rust > localdrop-linux-rust.sha256
       - name: Publish APK release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
@@ -58,3 +61,5 @@ jobs:
           files: |
             LocalDrop-debug.apk
             LocalDrop-debug.apk.sha256
+            localdrop-linux-rust
+            localdrop-linux-rust.sha256
