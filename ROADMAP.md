@@ -21,7 +21,7 @@
 
 ## Fase 3 — transferencias resilientes (en progreso)
 
-- [ ] Sesión multiarchivo con una sola solicitud y consentimiento.
+- [x] Sesión multiarchivo con una sola solicitud y consentimiento.
 - [x] Cola persistente en Room; las tareas sobreviven al cierre del proceso.
 - [x] Recuperación de tareas que quedaron `RUNNING` al reiniciar.
 - [x] Reintentos controlados con backoff y máximo de tres intentos.
