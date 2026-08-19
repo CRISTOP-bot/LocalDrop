@@ -57,7 +57,7 @@ class LocalDropRepositoryImpl(context: Context) : LocalDropRepository {
     override val incomingRequests: Flow<List<IncomingRequest>> = _incoming.map { it.values.toList() }.stateIn(scope, SharingStarted.Eagerly, emptyList())
     override val activeTransfer: Flow<TransferProgress?> = _active.asStateFlow()
     override val settings: Flow<LocalSettings> = _settings.asStateFlow()
-    override val history: Flow<List<TransferHistory>> = db.historyDao().observeAll().map { list -> list.map(HistoryEntity::toDomain) }
+    override val history: Flow<List<TransferHistory>> = db.historyDao().observeAll().map { list -> list.map { it.toDomain() } }
 
     init {
         scope.launch { db.settingsDao().observe().collect { value -> value?.let { _settings.value = it.toDomain() } } }
@@ -123,7 +123,7 @@ class LocalDropRepositoryImpl(context: Context) : LocalDropRepository {
         TransferService.start(app)
         try {
             for (file in files) {
-                ensureActive()
+                currentCoroutineContext().ensureActive()
                 var sha256: String? = null
                 try {
                     _active.value = TransferProgress(file.name, 0, file.size, state = TransferState.RUNNING)
