@@ -1,100 +1,140 @@
-name: Android CI and Release
+name: LocalDrop CI & Release
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+
   pull_request:
-    branches: [main]
+    branches:
+      - main
+
   workflow_dispatch:
 
+# Mínimo privilegio por defecto.
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: localdrop-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  JAVA_VERSION: "17"
+  ANDROID_API: "35"
+  ANDROID_BUILD_TOOLS: "35.0.0"
 
 jobs:
-  build:
+  # ============================================================
+  # Android
+  # ============================================================
+  android:
+    name: Android
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: gradle
 
+      # setup-android@v3 tuvo problemas en el workflow anterior
+      # al interpretar el bloque "packages". Instalamos explícitamente.
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-${ANDROID_API}" \
+            "build-tools;${ANDROID_BUILD_TOOLS}"
+
+          yes | sdkmanager --licenses >/dev/null || true
+
+      - name: Make Gradle executable
+        run: chmod +x ./gradlew
+
+      - name: Verify Gradle wrapper
+        run: ./gradlew --version
+
+      - name: Run Android unit tests
+        run: ./gradlew test --stacktrace
+
+      - name: Run Android lint
+        run: ./gradlew lint --stacktrace
+
+      # Release build:
+      # - usa la configuración release del proyecto
+      # - permite que R8/minification actúe si está configurado
+      - name: Build Android release
+        run: ./gradlew clean assembleRelease --stacktrace
+
+      - name: Verify Android artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK="app/build/outputs/apk/release/app-release.apk"
+          UNSIGNED_APK="app/build/outputs/apk/release/app-release-unsigned.apk"
+
+          if [[ -f "$APK" ]]; then
+            echo "Found: $APK"
+            cp "$APK" LocalDrop-release.apk
+          elif [[ -f "$UNSIGNED_APK" ]]; then
+            echo "Found unsigned release APK: $UNSIGNED_APK"
+            cp "$UNSIGNED_APK" LocalDrop-release-unsigned.apk
+          else
+            echo "ERROR: No release APK was produced."
+            find app/build/outputs -maxdepth 4 -type f -print || true
+            exit 1
+          fi
+
+      - name: Generate Android checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -f LocalDrop-release.apk ]]; then
+            sha256sum LocalDrop-release.apk > LocalDrop-release.apk.sha256
+          fi
+
+          if [[ -f LocalDrop-release-unsigned.apk ]]; then
+            sha256sum LocalDrop-release-unsigned.apk \
+              > LocalDrop-release-unsigned.apk.sha256
+          fi
+
+      - name: Upload Android CI artifact
+        uses: actions/upload-artifact@v4
         with:
-          packages: |
-            platform-tools
-            platforms;android-35
-            build-tools;35.0.0
-          accept-android-sdk-licenses: true
+          name: localdrop-android
+          path: |
+            LocalDrop-release.apk
+            LocalDrop-release.apk.sha256
+            LocalDrop-release-unsigned.apk
+            LocalDrop-release-unsigned.apk.sha256
+          if-no-files-found: error
 
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+  # ============================================================
+  # Linux C++
+  # ============================================================
+  linux-cpp:
+    name: Linux C++
+    runs-on: ubuntu-latest
 
-      # ---------------------------------------------------------
-      # Versioning
-      # ---------------------------------------------------------
-      - name: Calculate version
-        id: version
-        shell: bash
-        run: |
-          VERSION_CODE="${{ github.run_number }}"
-          VERSION_NAME="0.1.${VERSION_CODE}"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
 
-          echo "version_code=${VERSION_CODE}" >> "$GITHUB_OUTPUT"
-          echo "version_name=${VERSION_NAME}" >> "$GITHUB_OUTPUT"
-
-          echo "Version: ${VERSION_NAME}"
-          echo "Version code: ${VERSION_CODE}"
-
-      - name: Inject Android version
-        shell: bash
-        env:
-          VERSION_CODE: ${{ steps.version.outputs.version_code }}
-          VERSION_NAME: ${{ steps.version.outputs.version_name }}
-        run: |
-          python3 <<'PY'
-          import os
-          import re
-          from pathlib import Path
-
-          path = Path("app/build.gradle.kts")
-          text = path.read_text()
-
-          version_code = os.environ["VERSION_CODE"]
-          version_name = os.environ["VERSION_NAME"]
-
-          text = re.sub(
-              r'versionCode\s*=\s*\d+',
-              f'versionCode = {version_code}',
-              text
-          )
-
-          text = re.sub(
-              r'versionName\s*=\s*"[^"]+"',
-              f'versionName = "{version_name}"',
-              text
-          )
-
-          path.write_text(text)
-          PY
-
-      # ---------------------------------------------------------
-      # Android
-      # ---------------------------------------------------------
-      - name: Build, test and lint
-        run: |
-          gradle clean test assembleDebug lint --stacktrace
-
-      # ---------------------------------------------------------
-      # Linux C++
-      # ---------------------------------------------------------
-      - name: Build Linux C++ client
+      - name: Install C++ dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -103,58 +143,207 @@ jobs:
             libcurl4-openssl-dev \
             libssl-dev
 
-          cmake -S desktop-cpp -B desktop-cpp/build
-          cmake --build desktop-cpp/build --parallel
+      - name: Configure CMake
+        run: |
+          cmake -S desktop-cpp -B desktop-cpp/build \
+            -DCMAKE_BUILD_TYPE=Release
 
-      # ---------------------------------------------------------
-      # Linux Rust
-      # ---------------------------------------------------------
+      - name: Build C++ client
+        run: |
+          cmake --build desktop-cpp/build \
+            --parallel \
+            --config Release
+
+      - name: Verify C++ binary
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          find desktop-cpp/build \
+            -maxdepth 3 \
+            -type f \
+            -executable \
+            -print
+
+  # ============================================================
+  # Linux Rust
+  # ============================================================
+  linux-rust:
+    name: Linux Rust
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            localdrop-linux-rust
+
+      - name: Check formatting
+        working-directory: localdrop-linux-rust
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        working-directory: localdrop-linux-rust
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Test Rust client
         working-directory: localdrop-linux-rust
-        run: cargo test
+        run: cargo test --all-targets --all-features
 
-      - name: Build Rust client
+      - name: Build Rust release
         working-directory: localdrop-linux-rust
         run: cargo build --release
 
-      # ---------------------------------------------------------
-      # Prepare release assets
-      # ---------------------------------------------------------
-      - name: Prepare release files
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      - name: Verify Rust binaries
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          cp app/build/outputs/apk/debug/app-debug.apk \
-            LocalDrop-debug.apk
+          test -f \
+            localdrop-linux-rust/target/release/localdrop-linux-rust
 
-          sha256sum LocalDrop-debug.apk \
-            > LocalDrop-debug.apk.sha256
+          test -f \
+            localdrop-linux-rust/target/release/localdrop-linux-rust-gui
 
-          cp localdrop-linux-rust/target/release/localdrop-linux-rust \
+      - name: Prepare Rust release files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cp \
+            localdrop-linux-rust/target/release/localdrop-linux-rust \
             localdrop-linux-rust-x86_64
 
-          chmod +x localdrop-linux-rust-x86_64
-
-          sha256sum localdrop-linux-rust-x86_64 \
-            > localdrop-linux-rust-x86_64.sha256
-
-          cp localdrop-linux-rust/target/release/localdrop-linux-rust-gui \
+          cp \
+            localdrop-linux-rust/target/release/localdrop-linux-rust-gui \
             localdrop-linux-rust-gui-x86_64
 
-          chmod +x localdrop-linux-rust-gui-x86_64
+          chmod +x \
+            localdrop-linux-rust-x86_64 \
+            localdrop-linux-rust-gui-x86_64
 
-          sha256sum localdrop-linux-rust-gui-x86_64 \
+          sha256sum \
+            localdrop-linux-rust-x86_64 \
+            > localdrop-linux-rust-x86_64.sha256
+
+          sha256sum \
+            localdrop-linux-rust-gui-x86_64 \
             > localdrop-linux-rust-gui-x86_64.sha256
 
-      # ---------------------------------------------------------
-      # GitHub Release
-      # ---------------------------------------------------------
-      - name: Publish release
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      - name: Upload Rust CI artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: localdrop-rust
+          path: |
+            localdrop-linux-rust-x86_64
+            localdrop-linux-rust-x86_64.sha256
+            localdrop-linux-rust-gui-x86_64
+            localdrop-linux-rust-gui-x86_64.sha256
+          if-no-files-found: error
+
+  # ============================================================
+  # Release
+  # ============================================================
+  release:
+    name: GitHub Release
+    runs-on: ubuntu-latest
+    needs:
+      - android
+      - linux-cpp
+      - linux-rust
+
+    # Sólo publica desde main y nunca desde pull requests.
+    if: >
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main'
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download Android artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: localdrop-android
+          path: release-files
+
+      - name: Download Rust artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: localdrop-rust
+          path: release-files
+
+      - name: List release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          find release-files -maxdepth 2 -type f -print
+
+      - name: Calculate version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION_CODE="${GITHUB_RUN_NUMBER}"
+          VERSION_NAME="0.1.${VERSION_CODE}"
+
+          echo "version_code=${VERSION_CODE}" >> "$GITHUB_OUTPUT"
+          echo "version_name=${VERSION_NAME}" >> "$GITHUB_OUTPUT"
+
+          echo "Version name: ${VERSION_NAME}"
+          echo "Version code: ${VERSION_CODE}"
+
+      - name: Prepare release directory
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p release
+
+          find release-files \
+            -type f \
+            -exec cp {} release/ \;
+
+          ls -lah release
+
+      - name: Validate required release files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f release/localdrop-linux-rust-x86_64
+          test -f release/localdrop-linux-rust-gui-x86_64
+          test -f release/localdrop-linux-rust-x86_64.sha256
+          test -f release/localdrop-linux-rust-gui-x86_64.sha256
+
+          if [[ -f release/LocalDrop-release.apk ]]; then
+            test -f release/LocalDrop-release.apk.sha256
+          elif [[ -f release/LocalDrop-release-unsigned.apk ]]; then
+            test -f release/LocalDrop-release-unsigned.apk.sha256
+          else
+            echo "ERROR: No Android APK found."
+            exit 1
+          fi
+
+      - name: Create checksums manifest
+        shell: bash
+        working-directory: release
+        run: |
+          set -euo pipefail
+
+          sha256sum * > SHA256SUMS
+
+      - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.version.outputs.version_name }}
@@ -163,9 +352,12 @@ jobs:
           prerelease: true
           fail_on_unmatched_files: true
           files: |
-            LocalDrop-debug.apk
-            LocalDrop-debug.apk.sha256
-            localdrop-linux-rust-x86_64
-            localdrop-linux-rust-x86_64.sha256
-            localdrop-linux-rust-gui-x86_64
-            localdrop-linux-rust-gui-x86_64.sha256
+            release/LocalDrop-release.apk
+            release/LocalDrop-release.apk.sha256
+            release/LocalDrop-release-unsigned.apk
+            release/LocalDrop-release-unsigned.apk.sha256
+            release/localdrop-linux-rust-x86_64
+            release/localdrop-linux-rust-x86_64.sha256
+            release/localdrop-linux-rust-gui-x86_64
+            release/localdrop-linux-rust-gui-x86_64.sha256
+            release/SHA256SUMS
