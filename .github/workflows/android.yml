@@ -2,9 +2,9 @@ name: Android CI and Release
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -13,54 +13,155 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
+
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
         with:
-          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+          packages: |
+            platform-tools
+            platforms;android-35
+            build-tools;35.0.0
           accept-android-sdk-licenses: true
+
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
+
+      # ---------------------------------------------------------
+      # Versioning
+      # ---------------------------------------------------------
+      - name: Calculate version
+        id: version
+        shell: bash
+        run: |
+          VERSION_CODE="${{ github.run_number }}"
+          VERSION_NAME="0.1.${VERSION_CODE}"
+
+          echo "version_code=${VERSION_CODE}" >> "$GITHUB_OUTPUT"
+          echo "version_name=${VERSION_NAME}" >> "$GITHUB_OUTPUT"
+
+          echo "Version: ${VERSION_NAME}"
+          echo "Version code: ${VERSION_CODE}"
+
+      - name: Inject Android version
+        shell: bash
+        env:
+          VERSION_CODE: ${{ steps.version.outputs.version_code }}
+          VERSION_NAME: ${{ steps.version.outputs.version_name }}
+        run: |
+          python3 <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          path = Path("app/build.gradle.kts")
+          text = path.read_text()
+
+          version_code = os.environ["VERSION_CODE"]
+          version_name = os.environ["VERSION_NAME"]
+
+          text = re.sub(
+              r'versionCode\s*=\s*\d+',
+              f'versionCode = {version_code}',
+              text
+          )
+
+          text = re.sub(
+              r'versionName\s*=\s*"[^"]+"',
+              f'versionName = "{version_name}"',
+              text
+          )
+
+          path.write_text(text)
+          PY
+
+      # ---------------------------------------------------------
+      # Android
+      # ---------------------------------------------------------
       - name: Build, test and lint
-        run: gradle clean test assembleDebug lint --stacktrace
+        run: |
+          gradle clean test assembleDebug lint --stacktrace
+
+      # ---------------------------------------------------------
+      # Linux C++
+      # ---------------------------------------------------------
       - name: Build Linux C++ client
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake g++ libcurl4-openssl-dev libssl-dev
+          sudo apt-get install -y \
+            cmake \
+            g++ \
+            libcurl4-openssl-dev \
+            libssl-dev
+
           cmake -S desktop-cpp -B desktop-cpp/build
           cmake --build desktop-cpp/build --parallel
-      - name: Build Linux Rust client
+
+      # ---------------------------------------------------------
+      # Linux Rust
+      # ---------------------------------------------------------
+      - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
-      - name: Test and build Rust client
+
+      - name: Test Rust client
         working-directory: localdrop-linux-rust
-        run: |
-          cargo test
-          cargo build --release
+        run: cargo test
+
+      - name: Build Rust client
+        working-directory: localdrop-linux-rust
+        run: cargo build --release
+
+      # ---------------------------------------------------------
+      # Prepare release assets
+      # ---------------------------------------------------------
       - name: Prepare release files
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
-          cp app/build/outputs/apk/debug/app-debug.apk LocalDrop-debug.apk
-          sha256sum LocalDrop-debug.apk > LocalDrop-debug.apk.sha256
-          cp localdrop-linux-rust/target/release/localdrop-linux-rust localdrop-linux-rust-x86_64
+          set -e
+
+          cp app/build/outputs/apk/debug/app-debug.apk \
+            LocalDrop-debug.apk
+
+          sha256sum LocalDrop-debug.apk \
+            > LocalDrop-debug.apk.sha256
+
+          cp localdrop-linux-rust/target/release/localdrop-linux-rust \
+            localdrop-linux-rust-x86_64
+
           chmod +x localdrop-linux-rust-x86_64
-          sha256sum localdrop-linux-rust-x86_64 > localdrop-linux-rust-x86_64.sha256
-          cp localdrop-linux-rust/target/release/localdrop-linux-rust-gui localdrop-linux-rust-gui-x86_64
+
+          sha256sum localdrop-linux-rust-x86_64 \
+            > localdrop-linux-rust-x86_64.sha256
+
+          cp localdrop-linux-rust/target/release/localdrop-linux-rust-gui \
+            localdrop-linux-rust-gui-x86_64
+
           chmod +x localdrop-linux-rust-gui-x86_64
-          sha256sum localdrop-linux-rust-gui-x86_64 > localdrop-linux-rust-gui-x86_64.sha256
-      - name: Publish APK release
+
+          sha256sum localdrop-linux-rust-gui-x86_64 \
+            > localdrop-linux-rust-gui-x86_64.sha256
+
+      # ---------------------------------------------------------
+      # GitHub Release
+      # ---------------------------------------------------------
+      - name: Publish release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.1.${{ github.run_number }}
-          name: LocalDrop v0.1.${{ github.run_number }}
+          tag_name: v${{ steps.version.outputs.version_name }}
+          name: LocalDrop v${{ steps.version.outputs.version_name }}
           generate_release_notes: true
           prerelease: true
+          fail_on_unmatched_files: true
           files: |
             LocalDrop-debug.apk
             LocalDrop-debug.apk.sha256
